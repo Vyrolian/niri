@@ -59,11 +59,13 @@ use crate::animation::{Animation, Clock};
 use crate::input::swipe_tracker::SwipeTracker;
 use crate::layout::scrolling::ScrollDirection;
 use crate::niri_render_elements;
+use crate::render_helpers::background_effect::BackgroundEffectElement;
 use crate::render_helpers::offscreen::OffscreenData;
 use crate::render_helpers::renderer::NiriRenderer;
 use crate::render_helpers::snapshot::RenderSnapshot;
 use crate::render_helpers::solid_color::{SolidColorBuffer, SolidColorRenderElement};
 use crate::render_helpers::texture::TextureBuffer;
+use crate::render_helpers::xray::{Xray, XrayPos};
 use crate::render_helpers::{BakedBuffer, RenderCtx};
 use crate::rubber_band::RubberBand;
 use crate::utils::transaction::{Transaction, TransactionBlocker};
@@ -132,6 +134,11 @@ pub trait LayoutElement {
     /// Unique ID of this element.
     fn id(&self) -> &Self::Id;
 
+    /// Updates the config for the element.
+    fn update_config(&mut self, blur_config: niri_config::Blur) {
+        let _ = blur_config;
+    }
+
     /// Visual size of the element.
     ///
     /// This is what the user would consider the size, i.e. excluding CSD shadows and whatnot.
@@ -186,6 +193,21 @@ pub trait LayoutElement {
         push: &mut dyn FnMut(LayoutElementRenderElement<R>),
     ) {
         let _ = (ctx, location, scale, alpha, push);
+    }
+
+    /// Renders the background effect behind the main surface of the element.
+    #[allow(clippy::too_many_arguments)]
+    fn render_background_effect(
+        &self,
+        _ctx: RenderCtx<GlesRenderer>,
+        _geometry: Rectangle<f64, Logical>,
+        _scale: f64,
+        _clip_to_geometry: bool,
+        _surface_anim_scale: Scale<f64>,
+        _radius: CornerRadius,
+        _xray_pos: XrayPos,
+        _push: &mut dyn FnMut(BackgroundEffectElement),
+    ) {
     }
 
     /// Requests the element to change its size.
@@ -348,6 +370,7 @@ pub struct Options {
     pub animations: niri_config::Animations,
     pub gestures: niri_config::Gestures,
     pub overview: niri_config::Overview,
+    pub blur: niri_config::Blur,
     // Debug flags.
     pub disable_resize_throttling: bool,
     pub disable_transactions: bool,
@@ -608,6 +631,7 @@ impl Options {
             animations: config.animations.clone(),
             gestures: config.gestures,
             overview: config.overview,
+            blur: config.blur,
             disable_resize_throttling: config.debug.disable_resize_throttling,
             disable_transactions: config.debug.disable_transactions,
             deactivate_unfocused_windows: config.debug.deactivate_unfocused_windows,
@@ -4605,12 +4629,33 @@ impl<W: LayoutElement> Layout<W> {
         }
     }
 
-    pub fn store_unmap_snapshot(&mut self, renderer: &mut GlesRenderer, window: &W::Id) {
+    pub fn store_unmap_snapshot(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        xray: Option<&mut Xray>,
+        xray_has_blocked_out_layers: bool,
+        window: &W::Id,
+    ) {
         let _span = tracy_client::span!("Layout::store_unmap_snapshot");
+
+        let zoom = self.overview_zoom();
 
         if let Some(InteractiveMoveState::Moving(move_)) = &mut self.interactive_move {
             if move_.tile.window().id() == window {
-                move_.tile.store_unmap_snapshot_if_empty(renderer);
+                let pos_within_output = move_.tile_render_location(zoom);
+
+                // Computation matches update_render_elements().
+                let view_rect =
+                    Rectangle::new(pos_within_output.upscale(-1.), output_size(&move_.output))
+                        .downscale(zoom);
+                move_.tile.update_render_elements(false, view_rect);
+
+                move_.tile.store_unmap_snapshot_if_empty(
+                    renderer,
+                    xray,
+                    xray_has_blocked_out_layers,
+                    XrayPos::new(pos_within_output, zoom),
+                );
                 return;
             }
         }
@@ -4618,9 +4663,15 @@ impl<W: LayoutElement> Layout<W> {
         match &mut self.monitor_set {
             MonitorSet::Normal { monitors, .. } => {
                 for mon in monitors {
-                    for ws in &mut mon.workspaces {
+                    for (ws, geo) in mon.workspaces_with_render_geo_mut(false) {
                         if ws.has_window(window) {
-                            ws.store_unmap_snapshot_if_empty(renderer, window);
+                            ws.store_unmap_snapshot_if_empty(
+                                renderer,
+                                xray,
+                                xray_has_blocked_out_layers,
+                                XrayPos::new(geo.loc, zoom),
+                                window,
+                            );
                             return;
                         }
                     }
@@ -4629,7 +4680,13 @@ impl<W: LayoutElement> Layout<W> {
             MonitorSet::NoOutputs { workspaces, .. } => {
                 for ws in workspaces {
                     if ws.has_window(window) {
-                        ws.store_unmap_snapshot_if_empty(renderer, window);
+                        ws.store_unmap_snapshot_if_empty(
+                            renderer,
+                            xray,
+                            xray_has_blocked_out_layers,
+                            XrayPos::default(),
+                            window,
+                        );
                         return;
                     }
                 }
@@ -4748,14 +4805,18 @@ impl<W: LayoutElement> Layout<W> {
 
         let scale = Scale::from(move_.output.current_scale().fractional_scale());
         let zoom = self.overview_zoom();
-        let location = move_.tile_render_location(zoom);
-        move_.tile.render(ctx, location, true, &mut |elem| {
-            push(RescaleRenderElement::from_element(
-                elem,
-                location.to_physical_precise_round(scale),
-                zoom,
-            ));
-        });
+        let pos_in_backdrop = move_.tile_render_location(zoom);
+        let xray_pos = XrayPos::new(pos_in_backdrop, zoom);
+
+        move_
+            .tile
+            .render(ctx, pos_in_backdrop, xray_pos, true, &mut |elem| {
+                push(RescaleRenderElement::from_element(
+                    elem,
+                    pos_in_backdrop.to_physical_precise_round(scale),
+                    zoom,
+                ));
+            });
     }
 
     pub fn refresh(&mut self, is_active: bool) {

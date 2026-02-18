@@ -3,7 +3,7 @@ use niri_config::{Config, LayerRule};
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
 use smithay::backend::renderer::element::Kind;
 use smithay::desktop::{LayerSurface, PopupManager};
-use smithay::utils::{Logical, Point, Scale, Size};
+use smithay::utils::{Logical, Point, Rectangle, Scale, Size};
 use smithay::wayland::compositor::{remove_pre_commit_hook, HookId};
 use smithay::wayland::shell::wlr_layer::{ExclusiveZone, Layer};
 
@@ -11,11 +11,13 @@ use super::ResolvedLayerRules;
 use crate::animation::Clock;
 use crate::layout::shadow::Shadow;
 use crate::niri_render_elements;
+use crate::render_helpers::background_effect::BackgroundEffectElement;
 use crate::render_helpers::renderer::NiriRenderer;
 use crate::render_helpers::shadow::ShadowRenderElement;
 use crate::render_helpers::solid_color::{SolidColorBuffer, SolidColorRenderElement};
 use crate::render_helpers::surface::push_elements_from_surface_tree;
-use crate::render_helpers::RenderCtx;
+use crate::render_helpers::xray::XrayPos;
+use crate::render_helpers::{background_effect, RenderCtx};
 use crate::utils::{baba_is_float_offset, round_logical_in_physical};
 
 #[derive(Debug)]
@@ -40,6 +42,9 @@ pub struct MappedLayer {
     /// The shadow around the surface.
     shadow: Shadow,
 
+    /// The blur config, passed for background effect rendering.
+    blur_config: niri_config::Blur,
+
     /// The view size for the layer surface's output.
     view_size: Size<f64, Logical>,
 
@@ -55,6 +60,7 @@ niri_render_elements! {
         Wayland = WaylandSurfaceRenderElement<R>,
         SolidColor = SolidColorRenderElement,
         Shadow = ShadowRenderElement,
+        BackgroundEffect = BackgroundEffectElement,
     }
 }
 
@@ -82,6 +88,7 @@ impl MappedLayer {
             view_size,
             scale,
             shadow: Shadow::new(shadow_config),
+            blur_config: config.blur,
             clock,
         }
     }
@@ -92,6 +99,8 @@ impl MappedLayer {
         shadow_config.on = false;
         shadow_config.merge_with(&self.rules.shadow);
         self.shadow.update_config(shadow_config);
+
+        self.blur_config = config.blur;
     }
 
     pub fn update_shaders(&mut self) {
@@ -177,15 +186,20 @@ impl MappedLayer {
 
     pub fn render_normal<R: NiriRenderer>(
         &self,
-        ctx: RenderCtx<R>,
+        mut ctx: RenderCtx<R>,
         location: Point<f64, Logical>,
+        mut xray_pos: XrayPos,
         push: &mut dyn FnMut(LayerSurfaceRenderElement<R>),
     ) {
         let scale = Scale::from(self.scale);
         let alpha = self.rules.opacity.unwrap_or(1.).clamp(0., 1.);
         let location = location + self.bob_offset();
+        xray_pos = xray_pos.offset(self.bob_offset());
 
-        if ctx.target.should_block_out(self.rules.block_out_from) {
+        let surface = self.surface.wl_surface();
+
+        let should_block_out = ctx.target.should_block_out(self.rules.block_out_from);
+        if should_block_out {
             // Round to physical pixels.
             let location = location.to_physical_precise_round(scale).to_logical(scale);
 
@@ -201,7 +215,6 @@ impl MappedLayer {
             // Layer surfaces don't have extra geometry like windows.
             let buf_pos = location;
 
-            let surface = self.surface.wl_surface();
             push_elements_from_surface_tree(
                 ctx.renderer,
                 surface,
@@ -216,6 +229,26 @@ impl MappedLayer {
         let location = location.to_physical_precise_round(scale).to_logical(scale);
         self.shadow
             .render(ctx.renderer, location, &mut |elem| push(elem.into()));
+
+        let geometry = Rectangle::new(location, self.block_out_buffer.size());
+        let surface_off = Point::new(0., 0.); // No geometry on layer surfaces.
+        let surface_anim_scale = Scale::from(1.);
+        let radius = self.rules.geometry_corner_radius.unwrap_or_default();
+        background_effect::render_for_tile(
+            ctx.as_gles(),
+            geometry,
+            self.scale,
+            false,
+            surface,
+            surface_off,
+            surface_anim_scale,
+            self.blur_config,
+            radius,
+            self.rules.background_effect,
+            should_block_out,
+            xray_pos,
+            &mut |elem| push(elem.into()),
+        );
     }
 
     pub fn render_popups<R: NiriRenderer>(
