@@ -255,7 +255,8 @@ impl MappedLayer {
 
     pub fn render_popups<R: NiriRenderer>(
         &self,
-        ctx: RenderCtx<R>,
+        mut ctx: RenderCtx<R>,
+        ns: Option<usize>,
         location: Point<f64, Logical>,
         push: &mut dyn FnMut(LayerSurfaceRenderElement<R>),
     ) {
@@ -269,15 +270,26 @@ impl MappedLayer {
 
         let surface = self.surface.wl_surface();
         for (popup, offset) in PopupManager::popups_for_surface(surface) {
+            let surface = popup.wl_surface();
             let surface_loc = location + (offset - popup.geometry().loc).to_f64();
 
             push_elements_from_surface_tree(
                 ctx.renderer,
-                popup.wl_surface(),
+                surface,
                 surface_loc.to_physical_precise_round(scale),
                 scale,
                 alpha,
                 Kind::ScanoutCandidate,
+                &mut |elem| push(elem.into()),
+            );
+
+            background_effect::render_for_surface(
+                surface,
+                ctx.as_gles(),
+                ns,
+                self.blur_config,
+                surface_loc,
+                scale,
                 &mut |elem| push(elem.into()),
             );
         }

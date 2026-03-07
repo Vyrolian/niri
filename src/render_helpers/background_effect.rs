@@ -330,3 +330,60 @@ pub fn render_for_tile(
         background_effect.render(ctx, ns, params, xray_pos, push);
     });
 }
+
+pub fn render_for_surface(
+    surface: &WlSurface,
+    ctx: RenderCtx<GlesRenderer>,
+    ns: Option<usize>,
+    blur_config: niri_config::Blur,
+    location: Point<f64, Logical>,
+    scale: Scale<f64>,
+    push: &mut dyn FnMut(BackgroundEffectElement),
+) {
+    let blur_region = with_states(surface, get_cached_blur_region);
+    let Some(rects) = blur_region else {
+        return;
+    };
+    if rects.is_empty() {
+        return;
+    }
+
+    with_states(surface, |states| {
+        let mut main_surface_geo = surface_geo(states).unwrap_or_default().to_f64();
+        main_surface_geo.loc += location;
+
+        let subregion = TransformedRegion {
+            rects,
+            scale: Scale::from(1.),
+            offset: main_surface_geo.loc,
+        };
+
+        let geometry = main_surface_geo
+            .to_physical_precise_round(scale)
+            .to_logical(scale);
+
+        let params = RenderParams {
+            geometry,
+            subregion: Some(subregion),
+            clip: None,
+            scale: scale.x,
+        };
+
+        let background_effect = SurfaceBackgroundEffect::get(states);
+        let mut background_effect = background_effect.0.lock().unwrap();
+
+        background_effect.update_config(blur_config);
+        background_effect.update_render_elements(
+            CornerRadius::default(),
+            niri_config::BackgroundEffect {
+                // We don't do xray on popups.
+                xray: Some(false),
+                ..Default::default()
+            },
+            // We always have a blur region.
+            true,
+        );
+
+        background_effect.render(ctx, ns, params, XrayPos::default(), push);
+    });
+}

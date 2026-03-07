@@ -658,7 +658,7 @@ impl LayoutElement for Mapped {
 
     fn render_popups<R: NiriRenderer>(
         &self,
-        ctx: RenderCtx<R>,
+        mut ctx: RenderCtx<R>,
         location: Point<f64, Logical>,
         scale: Scale<f64>,
         alpha: f32,
@@ -670,15 +670,26 @@ impl LayoutElement for Mapped {
 
         let surface = self.toplevel().wl_surface();
         for (popup, offset) in PopupManager::popups_for_surface(surface) {
+            let surface = popup.wl_surface();
             let surface_loc = location + (offset - popup.geometry().loc).to_f64();
 
             push_elements_from_surface_tree(
                 ctx.renderer,
-                popup.wl_surface(),
+                surface,
                 surface_loc.to_physical_precise_round(scale),
                 scale,
                 alpha,
                 Kind::ScanoutCandidate,
+                &mut |elem| push(elem.into()),
+            );
+
+            background_effect::render_for_surface(
+                surface,
+                ctx.as_gles(),
+                None,
+                self.blur_config,
+                surface_loc,
+                scale,
                 &mut |elem| push(elem.into()),
             );
         }
