@@ -2,7 +2,7 @@ use std::cell::{Cell, Ref, RefCell};
 use std::sync::Arc;
 use std::time::Duration;
 
-use niri_config::{Color, CornerRadius, GradientInterpolation, WindowRule};
+use niri_config::{Color, Config, CornerRadius, GradientInterpolation, WindowRule};
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
 use smithay::backend::renderer::element::Kind;
 use smithay::backend::renderer::gles::GlesRenderer;
@@ -38,7 +38,7 @@ use crate::render_helpers::solid_color::{SolidColorBuffer, SolidColorRenderEleme
 use crate::render_helpers::surface::{
     push_elements_from_surface_tree, render_snapshot_from_surface_tree,
 };
-use crate::render_helpers::{BakedBuffer, RenderCtx, RenderTarget};
+use crate::render_helpers::{background_effect, BakedBuffer, RenderCtx, RenderTarget};
 use crate::utils::id::IdCounter;
 use crate::utils::transaction::Transaction;
 use crate::utils::{
@@ -105,6 +105,9 @@ pub struct Mapped {
 
     /// Buffer to draw instead of the window when it should be blocked out.
     block_out_buffer: RefCell<SolidColorBuffer>,
+
+    /// The blur config, passed for per-surface blur rendering.
+    blur_config: niri_config::Blur,
 
     /// Whether the next configure should be animated, if the configured state changed.
     animate_next_configure: bool,
@@ -251,7 +254,7 @@ enum RequestSizeOnce {
 }
 
 impl Mapped {
-    pub fn new(window: Window, rules: ResolvedWindowRules, hook: HookId) -> Self {
+    pub fn new(window: Window, rules: ResolvedWindowRules, hook: HookId, config: &Config) -> Self {
         let surface = window.wl_surface().expect("no X11 support");
         let credentials = get_credentials_for_surface(&surface);
 
@@ -272,6 +275,7 @@ impl Mapped {
             is_window_cast_target: false,
             ignore_opacity_window_rule: false,
             block_out_buffer: RefCell::new(SolidColorBuffer::new((0., 0.), [0., 0., 0., 1.])),
+            blur_config: config.blur,
             animate_next_configure: false,
             animate_serials: Vec::new(),
             animation_snapshot: None,
@@ -605,6 +609,10 @@ impl LayoutElement for Mapped {
         &self.window
     }
 
+    fn update_config(&mut self, blur_config: niri_config::Blur) {
+        self.blur_config = blur_config;
+    }
+
     fn size(&self) -> Size<i32, Logical> {
         self.window.geometry().size
     }
@@ -650,7 +658,7 @@ impl LayoutElement for Mapped {
 
     fn render_popups<R: NiriRenderer>(
         &self,
-        ctx: RenderCtx<R>,
+        mut ctx: RenderCtx<R>,
         location: Point<f64, Logical>,
         scale: Scale<f64>,
         alpha: f32,
@@ -662,18 +670,29 @@ impl LayoutElement for Mapped {
 
         let buf_pos = location - self.window.geometry().loc.to_f64();
         let surface = self.toplevel().wl_surface();
-        let mut push = |elem: WaylandSurfaceRenderElement<R>| push(elem.into());
         for (popup, popup_offset) in PopupManager::popups_for_surface(surface) {
+            let surface = popup.wl_surface();
             let offset = self.window.geometry().loc + popup_offset - popup.geometry().loc;
+            let surface_loc = buf_pos + offset.to_f64();
 
             push_elements_from_surface_tree(
                 ctx.renderer,
-                popup.wl_surface(),
-                (buf_pos + offset.to_f64()).to_physical_precise_round(scale),
+                surface,
+                surface_loc.to_physical_precise_round(scale),
                 scale,
                 alpha,
                 Kind::ScanoutCandidate,
-                &mut push,
+                &mut |elem| push(elem.into()),
+            );
+
+            background_effect::render_for_surface(
+                surface,
+                ctx.as_gles(),
+                None,
+                self.blur_config,
+                surface_loc,
+                scale,
+                &mut |elem| push(elem.into()),
             );
         }
     }

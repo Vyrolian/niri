@@ -258,6 +258,7 @@ impl<W: LayoutElement> Tile<W> {
         self.shadow.update_config(shadow_config);
 
         self.background_effect.update_config(self.options.blur);
+        self.window.update_config(self.options.blur);
     }
 
     pub fn update_shaders(&mut self) {
@@ -1220,6 +1221,12 @@ impl<W: LayoutElement> Tile<W> {
 
                     // Otherwise, render the solid color as is.
                     LayoutElementRenderElement::SolidColor(elem).into()
+                }
+                elem @ LayoutElementRenderElement::BackgroundEffect(_) => {
+                    // This is only used on popups for now. If subsurface blur is implemented, this
+                    // will need to be handled somehow.
+                    error!("background effect clipping is unimplemented");
+                    elem.into()
                 }
             };
 
