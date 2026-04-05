@@ -4650,7 +4650,8 @@ impl Niri {
                         surface,
                         render_element_states,
                         &feedback.render,
-                        &feedback.scanout,
+                        &feedback.scanout,   
+                        &feedback.async_scanout,
                     )
                 },
             );
@@ -4666,6 +4667,7 @@ impl Niri {
                         render_element_states,
                         &feedback.render,
                         &feedback.scanout,
+                        &feedback.async_scanout,
                     )
                 },
             );
@@ -4682,6 +4684,7 @@ impl Niri {
                         render_element_states,
                         &feedback.render,
                         &feedback.scanout,
+                        &feedback.async_scanout
                     )
                 },
             );
@@ -4698,6 +4701,7 @@ impl Niri {
                         render_element_states,
                         &feedback.render,
                         &feedback.scanout,
+                        &feedback.async_scanout,
                     )
                 },
             );
@@ -4714,6 +4718,7 @@ impl Niri {
                         render_element_states,
                         &feedback.render,
                         &feedback.scanout,
+                        &feedback.async_scanout,
                     )
                 },
             );

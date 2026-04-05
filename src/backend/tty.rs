@@ -30,6 +30,7 @@ use smithay::backend::egl::context::ContextPriority;
 use smithay::backend::egl::{EGLDevice, EGLDisplay};
 use smithay::backend::libinput::{LibinputInputBackend, LibinputSessionInterface};
 use smithay::backend::renderer::gles::GlesRenderer;
+use smithay::backend::renderer::PresentationMode;
 use smithay::backend::renderer::multigpu::gbm::GbmGlesBackend;
 use smithay::backend::renderer::multigpu::{GpuManager, MultiFrame, MultiRenderer};
 use smithay::backend::renderer::{DebugFlags, ImportDma, ImportEgl, RendererSuper};
@@ -63,6 +64,7 @@ use wayland_protocols::wp::presentation_time::server::wp_presentation_feedback;
 
 use super::{IpcOutputMap, RenderResult};
 use crate::backend::OutputId;
+use crate::layout::LayoutElement;
 use crate::frame_clock::FrameClock;
 use crate::niri::{Niri, RedrawState, State};
 use crate::render_helpers::debug::draw_damage;
@@ -395,6 +397,7 @@ struct Surface {
 pub struct SurfaceDmabufFeedback {
     pub render: DmabufFeedback,
     pub scanout: DmabufFeedback,
+    pub async_scanout: DmabufFeedback,
 }
 
 struct GammaProps {
@@ -1718,7 +1721,8 @@ impl Tty {
 
         // Mark the last frame as submitted.
         match surface.compositor.frame_submitted() {
-            Ok(Some((mut feedback, target_presentation_time))) => {
+            // Remove the 'Some' wrapper here
+            Ok((mut feedback, target_presentation_time)) => { 
                 let refresh = match refresh_interval {
                     Some(refresh) => {
                         if output_state.frame_clock.vrr() {
@@ -1730,7 +1734,6 @@ impl Tty {
                     None => Refresh::Unknown,
                 };
 
-                // FIXME: ideally should be monotonically increasing for a surface.
                 let seq = meta.sequence as u64;
                 let mut flags = wp_presentation_feedback::Kind::Vsync
                     | wp_presentation_feedback::Kind::HwCompletion;
@@ -1750,12 +1753,11 @@ impl Tty {
                     );
                 }
             }
-            Ok(None) => (),
+            // DELETE the Ok(None) => (), line that was here
             Err(err) => {
                 warn!("error marking frame as submitted: {err}");
             }
-        }
-
+        } 
         if let Some(last_sequence) = output_state.last_drm_sequence {
             let delta = meta.sequence as f64 - last_sequence as f64;
             tracy_client::Client::running()
@@ -1911,70 +1913,93 @@ impl Tty {
 
         // Hand them over to the DRM.
         let drm_compositor = &mut surface.compositor;
-        match drm_compositor.render_frame::<_, _>(&mut renderer, &elements, [0.; 4], flags) {
-            Ok(res) => {
-                let needs_sync = res.needs_sync()
-                    || self
-                        .config
-                        .borrow()
-                        .debug
-                        .wait_for_frame_completion_before_queueing;
-                if needs_sync {
-                    if let PrimaryPlaneElement::Swapchain(element) = res.primary_element {
-                        let _span = tracy_client::span!("wait for completion");
-                        if let Err(err) = element.sync.wait() {
-                            warn!("error waiting for frame completion: {err:?}");
-                        }
-                    }
+let allow_tearing = niri.layout.windows_for_output(output).any(|mapped| {
+    mapped.rules().allow_tearing == Some(true) 
+        && mapped.is_focused() 
+        && mapped.sizing_mode().is_fullscreen() // <--- ONLY TEAR IN FULLSCREEN
+        && {
+            let mut visible = false;
+            mapped.window.with_surfaces(|surface, states| {
+                if !visible && smithay::desktop::utils::surface_primary_scanout_output(surface, states).as_ref() == Some(output) {
+                    visible = true;
                 }
+            });
+            visible
+        }
+});
 
-                niri.update_primary_scanout_output(output, &res.states);
-                if let Some(dmabuf_feedback) = surface.dmabuf_feedback.as_ref() {
-                    niri.send_dmabuf_feedbacks(output, dmabuf_feedback, &res.states);
+// 2. Set presentation mode
+let presentation_mode = if allow_tearing {
+    smithay::backend::renderer::PresentationMode::Async
+} else {
+    smithay::backend::renderer::PresentationMode::VSync
+};     
+        match drm_compositor.render_frame::<_, _>(&mut renderer, &elements, [0.; 4], flags, presentation_mode){
+    Ok(res) => {
+        let needs_sync = res.needs_sync()
+            || self
+                .config
+                .borrow()
+                .debug
+                .wait_for_frame_completion_before_queueing;
+        if needs_sync {
+            if let PrimaryPlaneElement::Swapchain(element) = res.primary_element {
+                let _span = tracy_client::span!("wait for completion");
+                if let Err(err) = element.sync.wait() {
+                    warn!("error waiting for frame completion: {err:?}");
                 }
-
-                if !res.is_empty {
-                    let presentation_feedbacks =
-                        niri.take_presentation_feedbacks(output, &res.states);
-                    let data = (presentation_feedbacks, target_presentation_time);
-
-                    match drm_compositor.queue_frame(data) {
-                        Ok(()) => {
-                            let output_state = niri.output_state.get_mut(output).unwrap();
-                            let new_state = RedrawState::WaitingForVBlank {
-                                redraw_needed: false,
-                            };
-                            match mem::replace(&mut output_state.redraw_state, new_state) {
-                                RedrawState::Idle => unreachable!(),
-                                RedrawState::Queued => (),
-                                RedrawState::WaitingForVBlank { .. } => unreachable!(),
-                                RedrawState::WaitingForEstimatedVBlank(_) => unreachable!(),
-                                RedrawState::WaitingForEstimatedVBlankAndQueued(token) => {
-                                    niri.event_loop.remove(token);
-                                }
-                            };
-
-                            // We queued this frame successfully, so the current client buffers were
-                            // latched. We can send frame callbacks now, since a new client commit
-                            // will no longer overwrite this frame and will wait for a VBlank.
-                            output_state.frame_callback_sequence =
-                                output_state.frame_callback_sequence.wrapping_add(1);
-
-                            return RenderResult::Submitted;
-                        }
-                        Err(err) => {
-                            warn!("error queueing frame: {err}");
-                        }
-                    }
-                } else {
-                    rv = RenderResult::NoDamage;
-                }
-            }
-            Err(err) => {
-                // Can fail if we switched to a different TTY.
-                warn!("error rendering frame: {err}");
             }
         }
+
+        niri.update_primary_scanout_output(output, &res.states);
+        if let Some(dmabuf_feedback) = surface.dmabuf_feedback.as_ref() {
+            niri.send_dmabuf_feedbacks(output, dmabuf_feedback, &res.states);
+        }
+
+        if !res.is_empty {
+            let presentation_feedbacks =
+                niri.take_presentation_feedbacks(output, &res.states);
+            let data = (presentation_feedbacks, target_presentation_time);
+
+            // In Async mode, queue_frame will trigger an immediate (tearing) flip 
+            // thanks to the Smithay feature/async_formats branch logic.
+            match drm_compositor.queue_frame(data) {
+                Ok(()) => {
+                    let output_state = niri.output_state.get_mut(output).unwrap();
+                    
+                    // If we are tearing (Async), we don't technically wait for VBlank,
+                    // but we keep Niri's state machine happy by transitioning to WaitingForVBlank.
+                    let new_state = RedrawState::WaitingForVBlank {
+                        redraw_needed: false,
+                    };
+                    
+                    match mem::replace(&mut output_state.redraw_state, new_state) {
+                        RedrawState::Idle => unreachable!(),
+                        RedrawState::Queued => (),
+                        RedrawState::WaitingForVBlank { .. } => unreachable!(),
+                        RedrawState::WaitingForEstimatedVBlank(_) => unreachable!(),
+                        RedrawState::WaitingForEstimatedVBlankAndQueued(token) => {
+                            niri.event_loop.remove(token);
+                        }
+                    };
+
+                    output_state.frame_callback_sequence =
+                        output_state.frame_callback_sequence.wrapping_add(1);
+
+                    return RenderResult::Submitted;
+                }
+                Err(err) => {
+                    warn!("error queueing frame: {err}");
+                }
+            }
+        } else {
+            rv = RenderResult::NoDamage;
+        }
+    }
+    Err(err) => {
+        warn!("error rendering frame: {err}");
+    }
+} 
 
         // We're not expecting a vblank right after this.
         drop(surface.vblank_frame.take());
@@ -2827,7 +2852,7 @@ fn surface_dmabuf_feedback(
         builder.build()?
     };
 
-    Ok(SurfaceDmabufFeedback { render, scanout })
+    Ok(SurfaceDmabufFeedback{ render, scanout: scanout.clone(), async_scanout: scanout }) 
 }
 
 fn find_drm_property(

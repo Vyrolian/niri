@@ -29,15 +29,13 @@ tracing-subscriber = { version = "=0.3.19", features = ["env-filter"] }
 tracy-client = { version = "0.18.4", default-features = false }
 
 [workspace.dependencies.smithay]
-# version = "0.4.1"
 git = "https://github.com/Smithay/smithay.git"
-# path = "../smithay"
+branch = "feature/async_formats"  
 default-features = false
 
 [workspace.dependencies.smithay-drm-extras]
-# version = "0.1.0"
 git = "https://github.com/Smithay/smithay.git"
-# path = "../smithay/smithay-drm-extras"
+branch = "feature/async_formats"
 
 [package]
 name = "niri"

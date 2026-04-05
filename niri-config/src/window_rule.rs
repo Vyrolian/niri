@@ -66,6 +66,8 @@ pub struct WindowRule {
     pub variable_refresh_rate: Option<bool>,
     #[knuffel(child, unwrap(argument, str))]
     pub default_column_display: Option<ColumnDisplay>,
+    #[knuffel(child, unwrap(argument))]
+    pub allow_tearing: Option<bool>,
     #[knuffel(child)]
     pub default_floating_position: Option<FloatingPosition>,
     #[knuffel(child, unwrap(argument))]
