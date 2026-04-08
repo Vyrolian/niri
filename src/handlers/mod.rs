@@ -69,7 +69,7 @@ use smithay::{
     delegate_pointer_gestures, delegate_presentation, delegate_primary_selection,
     delegate_relative_pointer, delegate_seat, delegate_security_context, delegate_session_lock,
     delegate_single_pixel_buffer, delegate_tablet_manager, delegate_text_input_manager,
-    delegate_viewporter, delegate_virtual_keyboard_manager, delegate_xdg_activation,
+    delegate_viewporter, delegate_virtual_keyboard_manager, delegate_xdg_activation, delegate_drm_syncobj,
 };
 
 pub use crate::handlers::xdg_shell::KdeDecorationsModeState;
@@ -842,3 +842,4 @@ impl MutterX11InteropHandler for State {}
 delegate_mutter_x11_interop!(State);
 
 delegate_single_pixel_buffer!(State);
+delegate_drm_syncobj!(State);
