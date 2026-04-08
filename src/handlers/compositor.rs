@@ -568,17 +568,21 @@ impl State {
         // Priority 1: Use explicit sync acquire point if available.
         if let Some(acquire_point) = acquire_point {
             if let Ok((blocker, source)) = acquire_point.generate_blocker() {
-                let res = state.niri.event_loop.insert_source(source, {
-                    let client = client.clone();
-                    move |_, _, state| {
-                        let display_handle = state.niri.display_handle.clone();
-                        state
-                            .client_compositor_state(&client)
-                            .blocker_cleared(state, &display_handle);
-                        Ok(())
+                let res = 
+                    state
+                        .niri
+                        .event_loop
+                        .insert_source(source, {
+                            let client = client.clone();
+                            move |_, _, state| {
+                                let display_handle = state.niri.display_handle.clone();
+                                state
+                                    .client_compositor_state(&client)
+                                    .blocker_cleared(state, &display_handle);
+                                Ok(())
                     }
                 });
-                
+
                 if res.is_ok() {
                     add_blocker(surface, blocker);
                     trace!("added explicit sync acquire point blocker");
@@ -591,7 +595,11 @@ impl State {
         // Priority 2: Fallback to implicit sync via dmabuf polling.
         if let Some(dmabuf) = maybe_dmabuf {
             if let Ok((blocker, source)) = dmabuf.generate_blocker(Interest::READ) {
-                let res = state.niri.event_loop.insert_source(source, {
+                let res =
+                    state
+                        .niri
+                        .event_loop.
+                        insert_source(source, {
                     let client = client.clone();
                     move |_, _, state| {
                         let display_handle = state.niri.display_handle.clone();

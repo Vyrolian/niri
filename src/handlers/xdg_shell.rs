@@ -18,10 +18,7 @@ use smithay::reexports::wayland_server::protocol::wl_seat::WlSeat;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::{self, Resource, WEnum};
 use smithay::utils::{Logical, Rectangle, Serial};
-use smithay::backend::renderer::multigpu::MultiRenderer;
 use smithay::wayland::drm_syncobj::DrmSyncobjCachedState;
-use smithay::backend::renderer::gles::GlesRenderer;
-use smithay::backend::drm::DrmDeviceFd;
 use smithay::wayland::compositor::{
     add_blocker, add_pre_commit_hook, with_states, BufferAssignment, CompositorHandler as _,
     HookId, SurfaceAttributes,
@@ -1444,12 +1441,13 @@ fn unconstrain_with_padding(
 pub fn add_mapped_toplevel_pre_commit_hook(toplevel: &ToplevelSurface) -> HookId  {
     add_pre_commit_hook::<State, _>(toplevel.wl_surface(), move |state, _dh, surface| {
         let _span = tracy_client::span!("mapped toplevel pre-commit");
-        let span = trace_span!("toplevel pre-commit", surface = %surface.id(), serial = Empty).entered();
+        let span =
+            trace_span!("toplevel pre-commit", surface = %surface.id(), serial = Empty).entered();
 
-        let Some((mapped, output)) = state.niri.layout.find_window_and_output_mut(surface) else {
+        let Some((mapped, _)) = state.niri.layout.find_window_and_output_mut(surface) else {
             error!("pre-commit hook for mapped surfaces must be removed upon unmapping");
             return;
-        };
+        }; 
 
         // 1. Extract buffer states, explicit sync points, and dmabufs
         let (got_unmapped, commit_serial, acquire_point, dmabuf) = with_states(surface, |states| {
@@ -1457,24 +1455,33 @@ pub fn add_mapped_toplevel_pre_commit_hook(toplevel: &ToplevelSurface) -> HookId
                 let mut guard = states.cached_state.get::<SurfaceAttributes>();
                 match guard.pending().buffer.as_ref() {
                     Some(BufferAssignment::NewBuffer(buffer)) => {
-                        (false, get_dmabuf(buffer).cloned().ok())
-                    }
+                        let dmabuf = get_dmabuf(buffer).cloned().ok();
+                        (false, dmabuf)
+                    } 
                     Some(BufferAssignment::Removed) => (true, None),
                     None => (false, None),
                 }
             };
 
-            let role = states.data_map.get::<XdgToplevelSurfaceData>().unwrap().lock().unwrap();
+           let role = states
+                .data_map
+                .get::<XdgToplevelSurfaceData>()
+                .unwrap()
+                .lock()
+                .unwrap();
+
+            let serial = role.last_acked.as_ref().map(|c| c.serial);
+
             let acquire_point = states.cached_state.get::<DrmSyncobjCachedState>()
                 .pending()
                 .acquire_point
                 .clone();
 
-            (got_unmapped, role.last_acked.as_ref().map(|c| c.serial), acquire_point, dmabuf)
+            (got_unmapped, serial, acquire_point, dmabuf)
         });
 
         // 2. Handle Resize Transactions
-        let mut transaction_for_gpu_sync = None;
+        let mut transaction_for_dmabuf = None;
         let mut animate = false;
         
         if let Some(serial) = commit_serial {
@@ -1485,11 +1492,19 @@ pub fn add_mapped_toplevel_pre_commit_hook(toplevel: &ToplevelSurface) -> HookId
             if let Some(transaction) = mapped.take_pending_transaction(serial) {
                 let disable = state.niri.config.borrow().debug.disable_transactions;
                 if !transaction.is_completed() && !disable {
+                    // Register the deadline even if this is the last pending, since dmabuf
+                    // rendering can still run over the deadline.
                     transaction.register_deadline_timer(&state.niri.event_loop);
 
-                    // Cross-window sync: If this isn't the last window ready in a group resize,
-                    // we add a blocker so this window waits for its siblings.
-                    if !transaction.is_last() {
+                    let is_last = transaction.is_last();
+
+                    // If this is the last transaction, we don't need to add a separate
+                    // notification, because the transaction will complete in our dmabuf blocker
+                    // callback, which already calls blocker_cleared(), or by the end of this
+                    // function, in which case there would be no blocker in the first place. 
+                    if !is_last {
+                        // Waiting for some other surface; register a notification and add a
+                        // transaction blocker.
                         if let Some(client) = surface.client() {
                             transaction.add_notification(
                                 state.niri.blocker_cleared_tx.clone(),
@@ -1497,10 +1512,10 @@ pub fn add_mapped_toplevel_pre_commit_hook(toplevel: &ToplevelSurface) -> HookId
                             );
                             add_blocker(surface, transaction.blocker());
                         }
-                    }
+                    } 
 
                     // Keep the transaction alive until the GPU finishes rendering this frame.
-                    transaction_for_gpu_sync = Some(transaction);
+                    transaction_for_dmabuf = Some(transaction);
                 }
             }
             animate = mapped.should_animate_commit(serial);
@@ -1512,16 +1527,21 @@ pub fn add_mapped_toplevel_pre_commit_hook(toplevel: &ToplevelSurface) -> HookId
         if let Some(client) = surface.client() {
             // Priority A: Explicit Sync (linux-drm-syncobj-v1)
             if let Some((blocker, source)) = acquire_point.and_then(|ap| ap.generate_blocker().ok()) {
-                let res = state.niri.event_loop.insert_source(source, {
+                let res = state
+                    .niri
+                    .event_loop
+                    .insert_source(source, {
                     let client = client.clone();
                     move |_, _, state| {
-                        drop(transaction_for_gpu_sync.take());
-                        let dh = state.niri.display_handle.clone();
-                        state.client_compositor_state(&client).blocker_cleared(state, &dh);
+                        drop(transaction_for_dmabuf.take());
+                        let display_handle = state.niri.display_handle.clone();
+                        state
+                            .client_compositor_state(&client)
+                            .blocker_cleared(state, &display_handle);
+
                         Ok(())
                     }
                 });
-
                 if res.is_ok() {
                     add_blocker(surface, blocker);
                     trace!("added explicit gpu sync blocker");
@@ -1532,10 +1552,14 @@ pub fn add_mapped_toplevel_pre_commit_hook(toplevel: &ToplevelSurface) -> HookId
                 let res = state.niri.event_loop.insert_source(source, {
                     let client = client.clone();
                     move |_, _, state| {
-                        drop(transaction_for_gpu_sync.take());
-                        let dh = state.niri.display_handle.clone();
-                        state.client_compositor_state(&client).blocker_cleared(state, &dh);
-                        Ok(())
+                        drop(transaction_for_dmabuf.take());
+
+                        let display_handle = state.niri.display_handle.clone();
+                        state
+                            .client_compositor_state(&client)
+                            .blocker_cleared(state, &display_handle);
+
+                        Ok(()) 
                     }
                 });
                 
@@ -1545,9 +1569,6 @@ pub fn add_mapped_toplevel_pre_commit_hook(toplevel: &ToplevelSurface) -> HookId
                 }
             }
             // Priority C (Implicitly handled): 
-            // If neither A nor B matched (e.g., SHM buffer), transaction_for_gpu_sync 
-            // is NOT moved into a closure. It will drop at the end of this block,
-            // signaling the window is ready immediately.
         }
 
         // 4. Snapshots and Cleanup

@@ -30,7 +30,6 @@ use smithay::backend::egl::context::ContextPriority;
 use smithay::backend::egl::{EGLDevice, EGLDisplay};
 use smithay::backend::libinput::{LibinputInputBackend, LibinputSessionInterface};
 use smithay::backend::renderer::gles::GlesRenderer;
-use smithay::backend::renderer::PresentationMode;
 use smithay::backend::renderer::multigpu::gbm::GbmGlesBackend;
 use smithay::backend::renderer::multigpu::{GpuManager, MultiFrame, MultiRenderer};
 use smithay::backend::renderer::{DebugFlags, ImportDma, ImportEgl, RendererSuper};
@@ -852,6 +851,7 @@ impl Tty {
                     &default_feedback,
                 );
             assert!(self.dmabuf_global.replace(dmabuf_global).is_none());
+
             if supports_syncobj_eventfd(&device_fd) {
                 let syncobj_state =
                     DrmSyncobjState::new::<State>(&niri.display_handle, device_fd.clone());
@@ -2752,6 +2752,7 @@ impl DrmSyncobjHandler for State {
         )
     }
 }
+
 fn primary_node_from_render_node(path: &Path) -> Option<(DrmNode, DrmNode)> {
     match DrmNode::from_path(path) {
         Ok(node) => {
