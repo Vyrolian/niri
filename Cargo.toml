@@ -29,11 +29,13 @@ tracing-subscriber = { version = "=0.3.19", features = ["env-filter"] }
 tracy-client = { version = "0.18.4", default-features = false }
 
 [workspace.dependencies.smithay]
-path = "https://github.com/Vyrolian/smithay/tree/blur-tearing-merge"
+git = "https://github.com/Vyrolian/smithay"
+branch = "blur-tearing-merge"
 default-features = false
 
 [workspace.dependencies.smithay-drm-extras]
-path = "https://github.com/Vyrolian/smithay/tree/blur-tearing-merge"
+git = "https://github.com/Vyrolian/smithay"
+branch = "blur-tearing-merge"
 
 [package]
 name = "niri"
