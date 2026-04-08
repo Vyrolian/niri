@@ -1441,7 +1441,7 @@ fn unconstrain_with_padding(
     positioner.get_unconstrained_geometry(target.to_i32_round())
 }
 
-pub fn add_mapped_toplevel_pre_commit_hook(toplevel: &ToplevelSurface) -> HookId {
+pub fn add_mapped_toplevel_pre_commit_hook(toplevel: &ToplevelSurface) -> HookId  {
     add_pre_commit_hook::<State, _>(toplevel.wl_surface(), move |state, _dh, surface| {
         let _span = tracy_client::span!("mapped toplevel pre-commit");
         let span = trace_span!("toplevel pre-commit", surface = %surface.id(), serial = Empty).entered();
@@ -1451,13 +1451,13 @@ pub fn add_mapped_toplevel_pre_commit_hook(toplevel: &ToplevelSurface) -> HookId
             return;
         };
 
-        // 1. Extract buffer states and explicit sync acquire points
+        // 1. Extract buffer states, explicit sync points, and dmabufs
         let (got_unmapped, commit_serial, acquire_point, dmabuf) = with_states(surface, |states| {
             let (got_unmapped, dmabuf) = {
                 let mut guard = states.cached_state.get::<SurfaceAttributes>();
                 match guard.pending().buffer.as_ref() {
                     Some(BufferAssignment::NewBuffer(buffer)) => {
-                        (false, smithay::wayland::dmabuf::get_dmabuf(buffer).cloned().ok())
+                        (false, get_dmabuf(buffer).cloned().ok())
                     }
                     Some(BufferAssignment::Removed) => (true, None),
                     None => (false, None),
@@ -1465,13 +1465,16 @@ pub fn add_mapped_toplevel_pre_commit_hook(toplevel: &ToplevelSurface) -> HookId
             };
 
             let role = states.data_map.get::<XdgToplevelSurfaceData>().unwrap().lock().unwrap();
-            let acquire_point = states.cached_state.get::<DrmSyncobjCachedState>().pending().acquire_point.clone();
+            let acquire_point = states.cached_state.get::<DrmSyncobjCachedState>()
+                .pending()
+                .acquire_point
+                .clone();
 
             (got_unmapped, role.last_acked.as_ref().map(|c| c.serial), acquire_point, dmabuf)
         });
 
-        // 2. Extract active resize transactions (if any)
-        let mut active_transaction = None;
+        // 2. Handle Resize Transactions
+        let mut transaction_for_gpu_sync = None;
         let mut animate = false;
         
         if let Some(serial) = commit_serial {
@@ -1483,7 +1486,21 @@ pub fn add_mapped_toplevel_pre_commit_hook(toplevel: &ToplevelSurface) -> HookId
                 let disable = state.niri.config.borrow().debug.disable_transactions;
                 if !transaction.is_completed() && !disable {
                     transaction.register_deadline_timer(&state.niri.event_loop);
-                    active_transaction = Some(transaction);
+
+                    // Cross-window sync: If this isn't the last window ready in a group resize,
+                    // we add a blocker so this window waits for its siblings.
+                    if !transaction.is_last() {
+                        if let Some(client) = surface.client() {
+                            transaction.add_notification(
+                                state.niri.blocker_cleared_tx.clone(),
+                                client.clone(),
+                            );
+                            add_blocker(surface, transaction.blocker());
+                        }
+                    }
+
+                    // Keep the transaction alive until the GPU finishes rendering this frame.
+                    transaction_for_gpu_sync = Some(transaction);
                 }
             }
             animate = mapped.should_animate_commit(serial);
@@ -1491,68 +1508,51 @@ pub fn add_mapped_toplevel_pre_commit_hook(toplevel: &ToplevelSurface) -> HookId
             error!("commit on a mapped surface without a configured serial");
         };
 
-        // 3. Apply GPU Synchronization to EVERY frame
+        // 3. Apply GPU Synchronization (Explicit -> Implicit -> SHM)
         if let Some(client) = surface.client() {
-            let mut sync_handled = false;
-            
             // Priority A: Explicit Sync (linux-drm-syncobj-v1)
-            if let Some(ap) = acquire_point {
-                if let Ok((blocker, source)) = ap.generate_blocker() {
-                   eprintln!("SYNC_HIT");  
-                    let mut tr = active_transaction.clone(); 
-                    let res = state.niri.event_loop.insert_source(source, {
-                        let client = client.clone();
-                        move |_, _, state| {
-                            drop(tr.take()); // Safely takes the value out of the Option and drops it
-                            let dh = state.niri.display_handle.clone();
-                            state.client_compositor_state(&client).blocker_cleared(state, &dh);
-                            Ok(())
-                        }
-                    });
-
-                    if res.is_ok() {
-                        add_blocker(surface, blocker);
-                        sync_handled = true;
+            if let Some((blocker, source)) = acquire_point.and_then(|ap| ap.generate_blocker().ok()) {
+                let res = state.niri.event_loop.insert_source(source, {
+                    let client = client.clone();
+                    move |_, _, state| {
+                        drop(transaction_for_gpu_sync.take());
+                        let dh = state.niri.display_handle.clone();
+                        state.client_compositor_state(&client).blocker_cleared(state, &dh);
+                        Ok(())
                     }
-                }
-            }
+                });
 
+                if res.is_ok() {
+                    add_blocker(surface, blocker);
+                    trace!("added explicit gpu sync blocker");
+                }
+            } 
             // Priority B: Fallback to Implicit Sync (dmabuf polling)
-            if !sync_handled {
-                if let Some(dmabuf) = dmabuf {
-                    if let Ok((blocker, source)) = dmabuf.generate_blocker(smithay::reexports::calloop::Interest::READ) {
-                        let mut tr = active_transaction.clone();
-                        let res = state.niri.event_loop.insert_source(source, {
-                            let client = client.clone();
-                            move |_, _, state| {
-                                drop(tr.take()); // Safely takes the value out of the Option and drops it
-                                let dh = state.niri.display_handle.clone();
-                                state.client_compositor_state(&client).blocker_cleared(state, &dh);
-                                Ok(())
-                            }
-                        });
-                        
-                        if res.is_ok() {
-                            add_blocker(surface, blocker);
-                            sync_handled = true;
-                        }
+            else if let Some((blocker, source)) = dmabuf.and_then(|d| d.generate_blocker(Interest::READ).ok()) {
+                let res = state.niri.event_loop.insert_source(source, {
+                    let client = client.clone();
+                    move |_, _, state| {
+                        drop(transaction_for_gpu_sync.take());
+                        let dh = state.niri.display_handle.clone();
+                        state.client_compositor_state(&client).blocker_cleared(state, &dh);
+                        Ok(())
                     }
+                });
+                
+                if res.is_ok() {
+                    add_blocker(surface, blocker);
+                    trace!("added implicit gpu sync blocker");
                 }
             }
-
-            // Priority C: No sync needed (e.g. shm buffers), but we still must tie the transaction to the surface
-            if !sync_handled {
-                if let Some(tr) = active_transaction {
-                    tr.add_notification(state.niri.blocker_cleared_tx.clone(), client.clone());
-                    add_blocker(surface, tr.blocker());
-                }
-            }
+            // Priority C (Implicitly handled): 
+            // If neither A nor B matched (e.g., SHM buffer), transaction_for_gpu_sync 
+            // is NOT moved into a closure. It will drop at the end of this block,
+            // signaling the window is ready immediately.
         }
 
         // 4. Snapshots and Cleanup
         let window = mapped.window.clone();
         if got_unmapped {
-            let _output = output.cloned();
             state.backend.with_primary_renderer(|renderer| {
                 state.niri.layout.store_unmap_snapshot(renderer, None, false, &window);
             });
@@ -1562,6 +1562,7 @@ pub fn add_mapped_toplevel_pre_commit_hook(toplevel: &ToplevelSurface) -> HookId
                     mapped.store_animation_snapshot(renderer);
                 });
             }
+            // The toplevel remains mapped; clear any stored unmap snapshot.
             state.niri.layout.clear_unmap_snapshot(&window);
         }
     })
