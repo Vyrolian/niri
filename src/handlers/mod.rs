@@ -9,7 +9,7 @@ use std::os::fd::OwnedFd;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-
+use smithay::delegate_fifo;
 use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::drm::DrmNode;
 use smithay::backend::input::{InputEvent, TabletToolDescriptor};
@@ -843,3 +843,4 @@ delegate_mutter_x11_interop!(State);
 
 delegate_single_pixel_buffer!(State);
 delegate_drm_syncobj!(State);
+delegate_fifo!(State);

@@ -27,6 +27,7 @@ use smithay::backend::renderer::element::utils::{
     select_dmabuf_feedback, CropRenderElement, Relocate, RelocateRenderElement,
     RescaleRenderElement,
 };
+use smithay::wayland::fifo::{FifoManagerState, FifoBarrierCachedState};
 use smithay::backend::renderer::element::{
     default_primary_scanout_output_compare, Element, Id, Kind, PrimaryScanoutOutput, RenderElement,
     RenderElementStates,
@@ -409,7 +410,7 @@ pub struct Niri {
 
     pub ipc_server: Option<IpcServer>,
     pub ipc_outputs_changed: bool,
-
+    pub fifo_manager_state: FifoManagerState,
     pub satellite: Option<Satellite>,
 
     #[cfg(feature = "xdp-gnome-screencast")]
@@ -751,18 +752,31 @@ impl State {
         Ok(state)
     }
 
-    pub fn refresh_and_flush_clients(&mut self) {
+    pub fn refresh_and_flush_clients(&mut self){
         let _span = tracy_client::span!("State::refresh_and_flush_clients");
 
         self.refresh();
 
-        // Advance animations to the current time (not target render time) before rendering outputs
-        // in order to clear completed animations and render elements. Even if we're not rendering,
-        // it's good to advance every now and then so the workspace clean-up and animations don't
-        // build up (the 1 second frame callback timer will call this line).
+        // Advance animations
         self.niri.advance_animations();
 
-        self.niri.redraw_queued_outputs(&mut self.backend);
+        // --- REPLACE `self.niri.redraw_queued_outputs(&mut self.backend);` WITH THIS ---
+        let queued_outputs: Vec<_> = self.niri.output_state.iter()
+            .filter(|(_, state)| matches!(
+                state.redraw_state, 
+                RedrawState::Queued | RedrawState::WaitingForEstimatedVBlankAndQueued(_)
+            ))
+            .map(|(output, _)| output.clone())
+            .collect();
+
+        for output in queued_outputs {
+            // Draw the frame
+            self.niri.redraw(&mut self.backend, &output);
+            
+            // Unblock the client's next commit so it can start rendering the next frame
+            self.signal_fifo(&output);
+        }
+        // -------------------------------------------------------------------------------
 
         {
             let _span = tracy_client::span!("flush_clients");
@@ -776,8 +790,58 @@ impl State {
         self.niri.clock.clear();
         self.niri.pointer_inactivity_timer_got_reset = false;
         self.niri.notified_activity_this_iteration = false;
-    }
+    } 
+ // 👇 PASTE IT RIGHT HERE 👇
+    fn signal_fifo(&mut self, output: &Output) {
+        use smithay::reexports::wayland_server::backend::ClientId;
+        use smithay::desktop::layer_map_for_output;
+        use std::collections::HashMap;
 
+        let mut clients: HashMap<ClientId, Client> = HashMap::new();
+
+        // 1. Check standard windows
+        for mapped in self.niri.layout.windows_for_output(output) {
+            mapped.window.with_surfaces(|surface, states| {
+                if let Some(fifo_barrier) = states
+                    .cached_state
+                    .get::<FifoBarrierCachedState>()
+                    .current()
+                    .barrier
+                    .take()
+                {
+                    fifo_barrier.signal();
+                    if let Some(client) = surface.client() {
+                        clients.insert(client.id(), client);
+                    }
+                }
+            });
+        }
+
+        // 2. Check layer shell surfaces
+        for surface in layer_map_for_output(output).layers() {
+            surface.with_surfaces(|surface, states| {
+                if let Some(fifo_barrier) = states
+                    .cached_state
+                    .get::<FifoBarrierCachedState>()
+                    .current()
+                    .barrier
+                    .take()
+                {
+                    fifo_barrier.signal();
+                    if let Some(client) = surface.client() {
+                        clients.insert(client.id(), client);
+                    }
+                }
+            });
+        }
+
+        // 3. Critically important: Tell Smithay the blockers have cleared!
+        let display_handle = self.niri.display_handle.clone();
+        for client in clients.into_values() {
+            self.client_compositor_state(&client)
+                .blocker_cleared(self, &display_handle);
+        }
+    }
     // We monitor both libinput and logind: libinput is always there (including without DBus), but
     // it misses some switch events (e.g. after unsuspend) on some systems.
     pub fn set_lid_closed(&mut self, is_closed: bool) {
@@ -2233,7 +2297,11 @@ impl Niri {
         is_session_instance: bool,
     ) -> Self {
         let _span = tracy_client::span!("Niri::new");
-
+       // ✅ GOOD: Create display_handle first!
+        let display_handle = display.handle(); 
+        
+        // ✅ GOOD: Now we can use it!
+        let fifo_manager_state = FifoManagerState::new::<State>(&display_handle); 
         let (executor, scheduler) = calloop::futures::executor().unwrap();
         event_loop.insert_source(executor, |_, _, _| ()).unwrap();
 
@@ -2624,7 +2692,7 @@ impl Niri {
             ipc_outputs_changed: false,
 
             satellite: None,
-
+            fifo_manager_state,
             #[cfg(feature = "xdp-gnome-screencast")]
             casting: screencasting,
         };
@@ -2633,7 +2701,6 @@ impl Niri {
 
         niri
     }
-
     pub fn insert_client(&mut self, client: NewClient) {
         let NewClient {
             client,
@@ -2680,7 +2747,6 @@ impl Niri {
 
         Ok(())
     }
-
     /// Repositions all outputs, optionally adding a new output.
     pub fn reposition_outputs(&mut self, new_output: Option<&Output>) {
         let _span = tracy_client::span!("Niri::reposition_outputs");
@@ -3652,20 +3718,23 @@ impl Niri {
         state.redraw_state = mem::take(&mut state.redraw_state).queue_redraw();
     }
 
-    pub fn redraw_queued_outputs(&mut self, backend: &mut Backend) {
-        let _span = tracy_client::span!("Niri::redraw_queued_outputs");
+   pub fn redraw_queued_outputs(&mut self, backend: &mut Backend) {
+    let _span = tracy_client::span!("Niri::redraw_queued_outputs");
+    
+    // We loop until no more outputs are in a Queued state
+    while let Some((output, _)) = self.output_state.iter().find(|(_, state)| {
+        matches!(
+            state.redraw_state,
+            RedrawState::Queued | RedrawState::WaitingForEstimatedVBlankAndQueued(_)
+        )
+    }) {
+        let output = output.clone();
+        
 
-        while let Some((output, _)) = self.output_state.iter().find(|(_, state)| {
-            matches!(
-                state.redraw_state,
-                RedrawState::Queued | RedrawState::WaitingForEstimatedVBlankAndQueued(_)
-            )
-        }) {
-            trace!("redrawing output");
-            let output = output.clone();
-            self.redraw(backend, &output);
-        }
+        trace!("redrawing output");
+        self.redraw(backend, &output);
     }
+} 
 
     pub fn render_pointer<R: NiriRenderer>(
         &self,
@@ -4957,7 +5026,6 @@ impl Niri {
 
     pub fn send_frame_callbacks(&mut self, output: &Output) {
         let _span = tracy_client::span!("Niri::send_frame_callbacks");
-
         let state = self.output_state.get(output).unwrap();
         let sequence = state.frame_callback_sequence;
 

@@ -301,9 +301,12 @@ impl CompositorHandler for State {
 
                     // If this is the only instance, then this transaction will complete
                     // immediately, so no need to set the timer.
-                    if !transaction.is_last() {
-                        transaction.register_deadline_timer(&self.niri.event_loop);
-                    }
+                   if !transaction.is_last() {
+    transaction.register_deadline_timer(
+        &self.niri.event_loop,
+        &self.niri.display_handle, // ADD THIS
+    );
+} 
 
                     if was_active {
                         self.maybe_warp_cursor_to_focus();

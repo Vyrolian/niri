@@ -875,9 +875,11 @@ impl XdgShellHandler for State {
         // If this is the only instance, then this transaction will complete immediately, so no
         // need to set the timer.
         if !transaction.is_last() {
-            transaction.register_deadline_timer(&self.niri.event_loop);
-        }
-
+    transaction.register_deadline_timer(
+        &self.niri.event_loop,
+        &self.niri.display_handle,
+    );
+}   
         if was_active {
             self.maybe_warp_cursor_to_focus();
         }
@@ -1494,7 +1496,8 @@ pub fn add_mapped_toplevel_pre_commit_hook(toplevel: &ToplevelSurface) -> HookId
                 if !transaction.is_completed() && !disable {
                     // Register the deadline even if this is the last pending, since dmabuf
                     // rendering can still run over the deadline.
-                    transaction.register_deadline_timer(&state.niri.event_loop);
+                    transaction.register_deadline_timer(&state.niri.event_loop, 
+    &state.niri.display_handle,);
 
                     let is_last = transaction.is_last();
 

@@ -4,7 +4,9 @@ use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
-
+use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
+use smithay::reexports::wayland_server::DisplayHandle;
+use smithay::wayland::compositor::{add_blocker, CompositorHandler};
 use atomic::Ordering;
 use calloop::ping::{make_ping, Ping};
 use calloop::timer::{TimeoutAction, Timer};
@@ -64,7 +66,15 @@ impl Transaction {
             ))),
         }
     }
-
+ pub fn register_surface<T: CompositorHandler + 'static>(
+        &self,
+        surface: &WlSurface,
+        _event_loop: &LoopHandle<'static, T>,
+        _dh: &DisplayHandle,
+    ) {
+        trace!(transaction = ?Arc::as_ptr(&self.inner), "generating blocker");
+        add_blocker(surface, TransactionBlocker(Arc::downgrade(&self.inner)));
+    }
     /// Gets a blocker for this transaction.
     pub fn blocker(&self) -> TransactionBlocker {
         trace!(transaction = ?Arc::as_ptr(&self.inner), "generating blocker");
@@ -83,45 +93,44 @@ impl Transaction {
     }
 
     /// Registers this transaction's deadline timer on an event loop.
-    pub fn register_deadline_timer<T: 'static>(&self, event_loop: &LoopHandle<'static, T>) {
-        let mut cell = self.deadline.borrow_mut();
-        if let Deadline::NotRegistered(deadline) = *cell {
-            let timer = Timer::from_deadline(deadline);
-            let inner = Arc::downgrade(&self.inner);
-            let token = event_loop
-                .insert_source(timer, move |_, _, _| {
-                    let _span = trace_span!("deadline timer", transaction = ?Weak::as_ptr(&inner))
-                        .entered();
+   pub fn register_deadline_timer<T: CompositorHandler + 'static>(
+    &self, 
+    event_loop: &LoopHandle<'static, T>,
+    _dh: &smithay::reexports::wayland_server::DisplayHandle, // Add this argument
+) {
+    let mut cell = self.deadline.borrow_mut();
+    if let Deadline::NotRegistered(deadline) = *cell {
+        let timer = Timer::from_deadline(deadline);
+        let inner = Arc::downgrade(&self.inner);
+        
+        // Update the closure to accept 'state' instead of '_' 
+        // (This matches the calloop requirement for the new Smithay version)
+        let token = event_loop
+            .insert_source(timer, move |_, _, _state| { 
+                let _span = trace_span!("deadline timer", transaction = ?Weak::as_ptr(&inner))
+                    .entered();
 
-                    // FIXME: come up with some way to control the deadline timer from tests.
-                    #[cfg(not(test))]
-                    if let Some(inner) = inner.upgrade() {
-                        trace!("deadline reached, completing transaction");
-                        inner.complete();
-                    } else {
-                        // We should remove the timer automatically. But this callback can still
-                        // just happen to run while the ping callback is scheduled, leading to this
-                        // branch being legitimately taken.
-                        trace!("transaction completed without removing the timer");
-                    }
+                if let Some(inner) = inner.upgrade() {
+                    trace!("deadline reached, completing transaction");
+                    inner.complete();
+                } 
+                
+                TimeoutAction::Drop
+            })
+            .unwrap();
 
-                    TimeoutAction::Drop
-                })
-                .unwrap();
+        // The rest of your ping logic remains the same...
+        let (ping, source) = make_ping().unwrap();
+        let loop_handle = event_loop.clone();
+        event_loop
+            .insert_source(source, move |_, _, _| {
+                loop_handle.remove(token);
+            })
+            .unwrap();
 
-            // Add a ping source that will be used to remove the timer automatically.
-            let (ping, source) = make_ping().unwrap();
-            let loop_handle = event_loop.clone();
-            event_loop
-                .insert_source(source, move |_, _, _| {
-                    loop_handle.remove(token);
-                })
-                .unwrap();
-
-            *cell = Deadline::Registered { remove: ping };
-        }
+        *cell = Deadline::Registered { remove: ping };
     }
-
+} 
     /// Returns whether this transaction has already completed.
     pub fn is_completed(&self) -> bool {
         self.inner.is_completed()
