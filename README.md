@@ -1,3 +1,8 @@
+## New features
+- **Tearing** ("allow-tearing true" in windows rules). 
+- **Explicit Sync, FIFO, and Commit Timing**: This implementation is based on the combined work and research of [@Atan-D-RP4](https://github.com/Atan-D-RP4) (from [PR #3217](https://github.com/niri-wm/niri/pull/3217)) and [@cmeissl](https://github.com/cmeissl) (from [PR #1449](https://github.com/niri-wm/niri/pull/1449)). Made usable with the help of AI
+- **Transition Animations**: Based on the implementation by [@Atan-D-RP4](https://github.com/Atan-D-RP4) from [PR #3531](https://github.com/niri-wm/niri/pull/3531).
+
 <h1 align="center"><img alt="niri" src="https://github.com/user-attachments/assets/07d05cd0-d5dc-4a28-9a35-51bae8f119a0"></h1>
 <p align="center">A scrollable-tiling Wayland compositor.</p>
 <p align="center">
