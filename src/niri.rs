@@ -755,24 +755,28 @@ impl State {
     pub fn refresh_and_flush_clients(&mut self){
         let _span = tracy_client::span!("State::refresh_and_flush_clients");
 
-        // 1. Signal FIFO barriers for all outputs FIRST.
-        // This unblocks any clients that were waiting for the previous frame to finish.
-        // Once unblocked, they will commit, which calls queue_redraw().
-        let outputs: Vec<_> = self.niri.output_state.keys().cloned().collect();
-        for output in outputs {
-            self.signal_fifo(&output);
-        }
-
-        // 2. Run the standard refresh.
-        // This processes the commits that were just unblocked by signal_fifo.
         self.refresh();
 
-        // 3. Advance animations.
+        // Advance animations
         self.niri.advance_animations();
 
-        // 4. Draw everything that is now queued.
-        // This uses the "while" loop logic to ensure we don't miss anything.
-        self.niri.redraw_queued_outputs(&mut self.backend);
+        // --- REPLACE `self.niri.redraw_queued_outputs(&mut self.backend);` WITH THIS ---
+        let queued_outputs: Vec<_> = self.niri.output_state.iter()
+            .filter(|(_, state)| matches!(
+                state.redraw_state, 
+                RedrawState::Queued | RedrawState::WaitingForEstimatedVBlankAndQueued(_)
+            ))
+            .map(|(output, _)| output.clone())
+            .collect();
+
+        for output in queued_outputs {
+            // Draw the frame
+            self.niri.redraw(&mut self.backend, &output);
+            
+            // Unblock the client's next commit so it can start rendering the next frame
+            self.signal_fifo(&output);
+        }
+        // -------------------------------------------------------------------------------
 
         {
             let _span = tracy_client::span!("flush_clients");
@@ -782,12 +786,13 @@ impl State {
         #[cfg(feature = "dbus")]
         self.niri.update_locked_hint();
 
+        // Clear the time so it's fetched afresh next iteration.
         self.niri.clock.clear();
         self.niri.pointer_inactivity_timer_got_reset = false;
         self.niri.notified_activity_this_iteration = false;
     } 
  // 👇 PASTE IT RIGHT HERE 👇
-    fn signal_fifo(&mut self, output: &Output) {
+    fn signal_fifo(&mut self, output: &Output){
         use smithay::reexports::wayland_server::backend::ClientId;
         use smithay::desktop::layer_map_for_output;
         use std::collections::HashMap;
@@ -836,7 +841,7 @@ impl State {
             self.client_compositor_state(&client)
                 .blocker_cleared(self, &display_handle);
         }
-    }
+    } 
     // We monitor both libinput and logind: libinput is always there (including without DBus), but
     // it misses some switch events (e.g. after unsuspend) on some systems.
     pub fn set_lid_closed(&mut self, is_closed: bool) {
@@ -3711,23 +3716,34 @@ impl Niri {
         state.redraw_state = mem::take(&mut state.redraw_state).queue_redraw();
     }
 
-   pub fn redraw_queued_outputs(&mut self, backend: &mut Backend) {
-    let _span = tracy_client::span!("Niri::redraw_queued_outputs");
-    
-    // We loop until no more outputs are in a Queued state
-    while let Some((output, _)) = self.output_state.iter().find(|(_, state)| {
-        matches!(
-            state.redraw_state,
-            RedrawState::Queued | RedrawState::WaitingForEstimatedVBlankAndQueued(_)
-        )
-    }) {
-        let output = output.clone();
+  pub fn redraw_queued_outputs(&mut self, backend: &mut Backend) {
+        let _span = tracy_client::span!("Niri::redraw_queued_outputs");
         
+        while let Some((output, _)) = self.output_state.iter().find(|(output, state)| {
+            let is_queued = matches!(
+                state.redraw_state,
+                RedrawState::Queued | RedrawState::WaitingForEstimatedVBlankAndQueued(_)
+            );
+            
+            // Check if any window is waiting on FIFO (prevents the "initial hang")
+            let has_fifo_waiters = self.layout.windows_for_output(output).any(|m| {
+                let mut waiting = false;
+                // Use _surface to fix the compiler warning
+                m.window.with_surfaces(|_surface, states| {
+                    if states.cached_state.get::<FifoBarrierCachedState>().pending().barrier.is_some() {
+                        waiting = true;
+                    }
+                });
+                waiting
+            });
 
-        trace!("redrawing output");
-        self.redraw(backend, &output);
-    }
-} 
+            is_queued || has_fifo_waiters
+        }) {
+            let output = output.clone();
+            trace!("redrawing output");
+            self.redraw(backend, &output);
+        }
+    } 
 
     pub fn render_pointer<R: NiriRenderer>(
         &self,
