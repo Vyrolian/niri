@@ -1,0 +1,48 @@
+[33m66ca0024[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m, [m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m)[m HEAD@{0}: reset: moving to HEAD
+[33m66ca0024[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m, [m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m)[m HEAD@{1}: reset: moving to HEAD
+[33m66ca0024[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m, [m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m)[m HEAD@{2}: reset: moving to HEAD
+[33m66ca0024[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m, [m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m)[m HEAD@{3}: reset: moving to HEAD
+[33m66ca0024[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m, [m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m)[m HEAD@{4}: reset: moving to HEAD
+[33m66ca0024[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m, [m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m)[m HEAD@{5}: commit: fix FIFO
+[33m7a16f159[m HEAD@{6}: commit: FIFO fixes
+[33m3f2561cf[m HEAD@{7}: reset: moving to HEAD
+[33m3f2561cf[m HEAD@{8}: commit: FIFO implementation
+[33mc9ab6e85[m HEAD@{9}: reset: moving to HEAD
+[33mc9ab6e85[m HEAD@{10}: reset: moving to HEAD
+[33mc9ab6e85[m HEAD@{11}: reset: moving to HEAD
+[33mc9ab6e85[m HEAD@{12}: commit: Improve explicit sync code readability
+[33md6b7d1d6[m HEAD@{13}: reset: moving to HEAD
+[33md6b7d1d6[m HEAD@{14}: commit: Improved explicit sync
+[33m7914ceb8[m HEAD@{15}: reset: moving to origin/main
+[33m7914ceb8[m HEAD@{16}: checkout: moving from tearing to main
+[33mf31c09c4[m[33m ([m[1;31morigin/tearing[m[33m, [m[1;32mtearing[m[33m)[m HEAD@{17}: checkout: moving from main to tearing
+[33m7914ceb8[m HEAD@{18}: commit: Update Cargo.lock
+[33me377422f[m HEAD@{19}: commit: Update Cargo.toml
+[33m6114d32e[m HEAD@{20}: commit: Cargo.toml
+[33m18199728[m HEAD@{21}: reset: moving to origin/main
+[33m8d0b822a[m HEAD@{22}: checkout: moving from blur+tearing to main
+[33m3428fe25[m[33m ([m[1;32mblur+tearing[m[33m)[m HEAD@{23}: checkout: moving from main to blur+tearing
+[33m8d0b822a[m HEAD@{24}: checkout: moving from blur+tearing to main
+[33m3428fe25[m[33m ([m[1;32mblur+tearing[m[33m)[m HEAD@{25}: commit: Remove log
+[33m18199728[m HEAD@{26}: commit: Explicit sync
+[33m5da81de8[m HEAD@{27}: commit: Animations
+[33ma9af324d[m HEAD@{28}: reset: moving to HEAD
+[33ma9af324d[m HEAD@{29}: commit (merge): Merge Blur, Tearing, and Custom Shaders - The Ultimate Build
+[33mf31c09c4[m[33m ([m[1;31morigin/tearing[m[33m, [m[1;32mtearing[m[33m)[m HEAD@{30}: checkout: moving from tearing to blur+tearing
+[33mf31c09c4[m[33m ([m[1;31morigin/tearing[m[33m, [m[1;32mtearing[m[33m)[m HEAD@{31}: checkout: moving from tearing to tearing
+[33mf31c09c4[m[33m ([m[1;31morigin/tearing[m[33m, [m[1;32mtearing[m[33m)[m HEAD@{32}: rebase (finish): returning to refs/heads/tearing
+[33mf31c09c4[m[33m ([m[1;31morigin/tearing[m[33m, [m[1;32mtearing[m[33m)[m HEAD@{33}: rebase (pick): working tearing implementation
+[33mbe72e632[m HEAD@{34}: rebase (pick): ci: update `actions/checkout` to v6
+[33meff178db[m HEAD@{35}: rebase (pick): ui/hotkey_overlay: prettify diaeresis keysyms
+[33me0bd2430[m HEAD@{36}: rebase (pick): nix: fix NIRI_BUILD_COMMIT when tree is dirty/shortRev is not available
+[33mb70c9942[m[33m ([m[1;32mpr-3531[m[33m, [m[1;32mcustom-screen-shaders[m[33m)[m HEAD@{37}: rebase (start): checkout pr-3531
+[33m8d0b822a[m HEAD@{38}: checkout: moving from tearing to tearing
+[33m8d0b822a[m HEAD@{39}: checkout: moving from custom-screen-shaders to tearing
+[33mb70c9942[m[33m ([m[1;32mpr-3531[m[33m, [m[1;32mcustom-screen-shaders[m[33m)[m HEAD@{40}: checkout: moving from main to custom-screen-shaders
+[33m8d0b822a[m HEAD@{41}: reset: moving to HEAD
+[33m8d0b822a[m HEAD@{42}: reset: moving to HEAD
+[33m8d0b822a[m HEAD@{43}: reset: moving to HEAD
+[33m8d0b822a[m HEAD@{44}: reset: moving to 8d0b822a
+[33mba9aa420[m HEAD@{45}: commit (merge): Merge Blur into Tearing
+[33m8d0b822a[m HEAD@{46}: commit: working tearing implementation
+[33md1a0380e[m HEAD@{47}: clone: from https://github.com/niri-wm/niri.git
