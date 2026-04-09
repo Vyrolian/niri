@@ -755,28 +755,24 @@ impl State {
     pub fn refresh_and_flush_clients(&mut self){
         let _span = tracy_client::span!("State::refresh_and_flush_clients");
 
-        self.refresh();
-
-        // Advance animations
-        self.niri.advance_animations();
-
-        // --- REPLACE `self.niri.redraw_queued_outputs(&mut self.backend);` WITH THIS ---
-        let queued_outputs: Vec<_> = self.niri.output_state.iter()
-            .filter(|(_, state)| matches!(
-                state.redraw_state, 
-                RedrawState::Queued | RedrawState::WaitingForEstimatedVBlankAndQueued(_)
-            ))
-            .map(|(output, _)| output.clone())
-            .collect();
-
-        for output in queued_outputs {
-            // Draw the frame
-            self.niri.redraw(&mut self.backend, &output);
-            
-            // Unblock the client's next commit so it can start rendering the next frame
+        // 1. Signal FIFO barriers for all outputs FIRST.
+        // This unblocks any clients that were waiting for the previous frame to finish.
+        // Once unblocked, they will commit, which calls queue_redraw().
+        let outputs: Vec<_> = self.niri.output_state.keys().cloned().collect();
+        for output in outputs {
             self.signal_fifo(&output);
         }
-        // -------------------------------------------------------------------------------
+
+        // 2. Run the standard refresh.
+        // This processes the commits that were just unblocked by signal_fifo.
+        self.refresh();
+
+        // 3. Advance animations.
+        self.niri.advance_animations();
+
+        // 4. Draw everything that is now queued.
+        // This uses the "while" loop logic to ensure we don't miss anything.
+        self.niri.redraw_queued_outputs(&mut self.backend);
 
         {
             let _span = tracy_client::span!("flush_clients");
@@ -786,7 +782,6 @@ impl State {
         #[cfg(feature = "dbus")]
         self.niri.update_locked_hint();
 
-        // Clear the time so it's fetched afresh next iteration.
         self.niri.clock.clear();
         self.niri.pointer_inactivity_timer_got_reset = false;
         self.niri.notified_activity_this_iteration = false;
@@ -2298,14 +2293,12 @@ impl Niri {
     ) -> Self {
         let _span = tracy_client::span!("Niri::new");
        // ✅ GOOD: Create display_handle first!
-        let display_handle = display.handle(); 
-        
+        let display_handle = display.handle();
         // ✅ GOOD: Now we can use it!
         let fifo_manager_state = FifoManagerState::new::<State>(&display_handle); 
         let (executor, scheduler) = calloop::futures::executor().unwrap();
         event_loop.insert_source(executor, |_, _, _| ()).unwrap();
 
-        let display_handle = display.handle();
         let config_ = config.borrow();
         let config_file_output_config = config_.outputs.clone();
 
