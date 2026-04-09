@@ -3883,85 +3883,84 @@ impl Niri {
         state.redraw_state = mem::take(&mut state.redraw_state).queue_redraw();
     }
 
-  pub fn redraw_queued_outputs(&mut self, backend: &mut Backend){
+   pub fn redraw_queued_outputs(&mut self, backend: &mut Backend) {
         let _span = tracy_client::span!("Niri::redraw_queued_outputs");
-        
-        // Clone the keys so we can iterate over outputs while mutating self
-        let outputs: Vec<_> = self.output_state.keys().cloned().collect();
 
-        for output in outputs {
-            let state = self.output_state.get(&output).unwrap();
-
-            // Safety check: Don't redraw if we are already waiting for a VBlank!
-            if matches!(state.redraw_state, RedrawState::WaitingForVBlank { .. }) {
-                continue;
-            }
-
-            // Check if a redraw is naturally queued by Niri
-            let mut needs_redraw = matches!(
+        while let Some((output, _)) = self.output_state.iter().find(|(output, state)| {
+            // Check original Niri states
+            let niri_queued = matches!(
                 state.redraw_state,
                 RedrawState::Queued | RedrawState::WaitingForEstimatedVBlankAndQueued(_)
             );
 
-            // If not naturally queued, check if there are clients waiting on FIFO.
-            if !needs_redraw {
-                use smithay::wayland::compositor::{with_surface_tree_downward, TraversalAction, SurfaceData};
-                use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-                use smithay::wayland::fifo::FifoBarrierCachedState;
-                use std::cell::Cell;
+            // Check if we have apps waiting on FIFO (your new logic)
+            let fifo_queued = self.output_has_fifo_waiters(output);
 
-                // Use Cell to safely mutate the boolean from within the closure
-                let has_waiters = Cell::new(false);
-
-                let mut check_surface = |_surface: &WlSurface, states: &SurfaceData| {
-                    if states.cached_state.get::<FifoBarrierCachedState>().pending().barrier.is_some() {
-                        has_waiters.set(true);
-                    }
-                };
-
-                // 1. Check standard windows (with_surfaces automatically checks subsurfaces)
-                for mapped in self.layout.windows_for_output(&output) {
-                    if has_waiters.get() { break; }
-                    mapped.window.with_surfaces(&mut check_surface);
-                }
-
-                // 2. Check layer shell surfaces
-                if !has_waiters.get() {
-                    for surface in layer_map_for_output(&output).layers() {
-                        if has_waiters.get() { break; }
-                        surface.with_surfaces(&mut check_surface);
-                    }
-                }
-
-                // 3. Check lock surfaces
-                if !has_waiters.get() {
-                    if let Some(lock_surface) = &state.lock_surface {
-                        with_surface_tree_downward(
-                            lock_surface.wl_surface(),
-                            (),
-                            |_, _, _| TraversalAction::DoChildren(()),
-                            |surface, states, _| check_surface(surface, states),
-                            |_, _, _| true,
-                        );
-                    }
-                }
-
-                if has_waiters.get() {
-                    needs_redraw = true;
-                }
-            }
-
-            if needs_redraw {
-                // Explicitly tell Niri to queue the redraw to satisfy the internal 
-                // `assert!(matches!(state.redraw_state, Queued))` inside `self.redraw()`.
+            niri_queued || fifo_queued
+        }) {
+            let output = output.clone();
+            trace!("redrawing output");
+            
+            // Redraw needs the state to be "Queued" to pass internal checks
+            if !matches!(self.output_state[&output].redraw_state, RedrawState::Queued | RedrawState::WaitingForEstimatedVBlankAndQueued(_)) {
                 self.queue_redraw(&output);
-                
-                self.redraw(backend, &output);
             }
-        }
-    } 
 
-    pub fn render_pointer<R: NiriRenderer>(
+            self.redraw(backend, &output);
+        }
+    }
+
+    // 2. This is the helper function 
+    // // It hides all the surface-looping code so your main function stays pretty.
+    fn output_has_fifo_waiters(&self, output: &Output) -> bool {
+    use std::cell::Cell; // Add this or use std::cell::Cell below
+    use smithay::wayland::fifo::FifoBarrierCachedState;
+
+    // 1. If we are currently waiting for hardware (VBlank), 
+    // don't report as "queued" to avoid double-draws.
+    if let Some(state) = self.output_state.get(output) {
+        if matches!(state.redraw_state, RedrawState::WaitingForVBlank { .. }) {
+            return false;
+        }
+    }
+
+    // 2. Use a Cell to bypass the borrow checker error
+    let found_waiter = Cell::new(false);
+
+    // 3. The closure now takes a reference to the Cell container
+    let mut check_surface = |_: &WlSurface, states: &SurfaceData| {
+        if states.cached_state.get::<FifoBarrierCachedState>().pending().barrier.is_some() {
+            found_waiter.set(true);
+        }
+    };
+
+    // Check Windows
+    for mapped in self.layout.windows_for_output(output) {
+        mapped.window.with_surfaces(&mut check_surface);
+        if found_waiter.get() { return true; }
+    }
+
+    // Check Layers
+    for surface in layer_map_for_output(output).layers() {
+        surface.with_surfaces(&mut check_surface);
+        if found_waiter.get() { return true; }
+    }
+
+    // Check Lock Screen
+    if let Some(state) = self.output_state.get(output) {
+        if let Some(lock) = &state.lock_surface {
+            with_surface_tree_downward(
+                lock.wl_surface(),
+                (),
+                |_, _, _| TraversalAction::DoChildren(()),
+                |surface, states, _| check_surface(surface, states),
+                |_, _, _| true,
+            );
+        }
+    }
+
+    found_waiter.get()
+}    pub fn render_pointer<R: NiriRenderer>(
         &self,
         renderer: &mut R,
         output: &Output,
