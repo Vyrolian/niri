@@ -979,10 +979,6 @@ impl State {
             {
                 if commit_timer_state.signal_until(target_time_monotonic) {
                     if let Some(client) = surface.client() {
-                        eprintln!(
-                            "[Timing] Unblocking client {:?} (Target reached)",
-                            client.id()
-                        );
                         clients.insert(client.id(), client);
                     }
                 }
@@ -1002,11 +998,20 @@ impl State {
             }
         };
 
-        // 1. Mapped Windows
+        // 1. Mapped Windows (Deep Walk)
         for mapped in self.niri.layout.windows_for_output(output) {
-            mapped.window.with_surfaces(&mut check_surface);
+            mapped.window.with_surfaces(|surface, _| {
+                with_surface_tree_downward(
+                    surface,
+                    (),
+                    |_, _, _| TraversalAction::DoChildren(()),
+                    |s, states, _| check_surface(s, states),
+                    |_, _, _| true,
+                );
+            });
         }
-        // Unmapped Windows
+
+        // 2. Unmapped Windows (Deep Walk)
         for unmapped_surface in self.niri.unmapped_windows.keys() {
             with_surface_tree_downward(
                 unmapped_surface,
@@ -1017,12 +1022,18 @@ impl State {
             );
         }
 
-        // 3. Mapped Layers
-        for surface in layer_map_for_output(output).layers() {
-            surface.with_surfaces(&mut check_surface);
+        // 3. Mapped Layers (Deep Walk)
+        for layer_surface in layer_map_for_output(output).layers() {
+            with_surface_tree_downward(
+                layer_surface.wl_surface(),
+                (),
+                |_, _, _| TraversalAction::DoChildren(()),
+                |surface, states, _| check_surface(surface, states),
+                |_, _, _| true,
+            );
         }
 
-        // 4. Unmapped Layers
+        // 4. Unmapped Layers (Deep Walk)
         for unmapped_layer in &self.niri.unmapped_layer_surfaces {
             with_surface_tree_downward(
                 unmapped_layer,
@@ -1033,11 +1044,11 @@ impl State {
             );
         }
 
-        // 5. UI Elements
+        // 5. Lock Surface
         if let Some(state) = self.niri.output_state.get(output) {
-            if let Some(surface) = &state.lock_surface {
+            if let Some(lock) = &state.lock_surface {
                 with_surface_tree_downward(
-                    surface.wl_surface(),
+                    lock.wl_surface(),
                     (),
                     |_, _, _| TraversalAction::DoChildren(()),
                     |surface, states, _| check_surface(surface, states),
@@ -1046,6 +1057,7 @@ impl State {
             }
         }
 
+        // 6. DnD Icon
         if let Some(surface) = self.niri.dnd_icon.as_ref().map(|icon| &icon.surface) {
             with_surface_tree_downward(
                 surface,
@@ -1056,6 +1068,7 @@ impl State {
             );
         }
 
+        // 7. Cursor
         if let CursorImageStatus::Surface(surface) = self.niri.cursor_manager.cursor_image() {
             with_surface_tree_downward(
                 surface,
