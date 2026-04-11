@@ -30,12 +30,12 @@ tracy-client = { version = "0.18.4", default-features = false }
 
 [workspace.dependencies.smithay]
 git = "https://github.com/Vyrolian/smithay"
-branch = "blur-tearing-merge"
+rev = "f8a8f0fae1a6160451bf9a4cd1b2adeb66a6c11d"
 default-features = false
 
 [workspace.dependencies.smithay-drm-extras]
 git = "https://github.com/Vyrolian/smithay"
-branch = "blur-tearing-merge"
+rev = "f8a8f0fae1a6160451bf9a4cd1b2adeb66a6c11d"
 
 [package]
 name = "niri"
