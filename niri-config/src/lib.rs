@@ -1853,6 +1853,7 @@ mod tests {
                     default_column_display: Some(
                         Tabbed,
                     ),
+                    allow_tearing: None,
                     default_floating_position: Some(
                         FloatingPosition {
                             x: FloatOrInt(
