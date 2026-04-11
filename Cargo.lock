@@ -1717,18 +1717,6 @@ dependencies = [
 
 [[package]]
 name = "input"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fbdc09524a91f9cacd26f16734ff63d7dc650daffadd2b6f84d17a285bd875a9"
-dependencies = [
- "bitflags 2.11.0",
- "input-sys",
- "libc",
- "udev",
-]
-
-[[package]]
-name = "input"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9793345a65d71317763a33066b5d8351f8760dde8d4930fe9e39b5f14a7959d"
@@ -2269,7 +2257,7 @@ dependencies = [
  "futures-util",
  "git-version",
  "glam",
- "input 0.10.0",
+ "input",
  "insta",
  "keyframe",
  "libc",
@@ -3532,7 +3520,7 @@ checksum = "b7c388c1b5e93756d0c740965c41e8822f866621d41acbdf6336a6a168f8840c"
 [[package]]
 name = "smithay"
 version = "0.7.0"
-source = "git+https://github.com/Vyrolian/smithay?rev=92a63188338432e5b946b8bad794da22d9485b2e#92a63188338432e5b946b8bad794da22d9485b2e"
+source = "git+https://github.com/Vyrolian/smithay?branch=blur-tearing-merge#a0c96dcf72552aad0645d283bba55885074fec12"
 dependencies = [
  "aliasable",
  "appendlist",
@@ -3550,7 +3538,7 @@ dependencies = [
  "gbm",
  "gl_generator",
  "indexmap",
- "input 0.9.1",
+ "input",
  "libc",
  "libloading",
  "libseat",
@@ -3607,7 +3595,7 @@ dependencies = [
 [[package]]
 name = "smithay-drm-extras"
 version = "0.1.0"
-source = "git+https://github.com/Vyrolian/smithay?rev=92a63188338432e5b946b8bad794da22d9485b2e#92a63188338432e5b946b8bad794da22d9485b2e"
+source = "git+https://github.com/Vyrolian/smithay?branch=blur-tearing-merge#a0c96dcf72552aad0645d283bba55885074fec12"
 dependencies = [
  "drm",
  "libdisplay-info",
