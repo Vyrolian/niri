@@ -1724,6 +1724,18 @@ dependencies = [
  "bitflags 2.11.0",
  "input-sys",
  "libc",
+ "udev",
+]
+
+[[package]]
+name = "input"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9793345a65d71317763a33066b5d8351f8760dde8d4930fe9e39b5f14a7959d"
+dependencies = [
+ "bitflags 2.11.0",
+ "input-sys",
+ "libc",
  "log",
  "udev",
 ]
@@ -2257,7 +2269,7 @@ dependencies = [
  "futures-util",
  "git-version",
  "glam",
- "input",
+ "input 0.10.0",
  "insta",
  "keyframe",
  "libc",
@@ -3538,7 +3550,7 @@ dependencies = [
  "gbm",
  "gl_generator",
  "indexmap",
- "input",
+ "input 0.9.1",
  "libc",
  "libloading",
  "libseat",

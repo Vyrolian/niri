@@ -301,12 +301,12 @@ impl CompositorHandler for State {
 
                     // If this is the only instance, then this transaction will complete
                     // immediately, so no need to set the timer.
-                   if !transaction.is_last() {
-    transaction.register_deadline_timer(
-        &self.niri.event_loop,
-        &self.niri.display_handle, // ADD THIS
-    );
-} 
+                    if !transaction.is_last() {
+                        transaction.register_deadline_timer(
+                            &self.niri.event_loop,
+                            &self.niri.display_handle, // ADD THIS
+                        );
+                    }
 
                     if was_active {
                         self.maybe_warp_cursor_to_focus();
@@ -512,7 +512,7 @@ impl CompositorHandler for State {
         // So, this may come out empty, and then the toplevel pre-commit hook will be removed in the
         // subsequent toplevel_destroyed() call.
         if let Some(hook) = self.niri.dmabuf_pre_commit_hook.remove(surface) {
-            remove_pre_commit_hook(surface, hook);
+            remove_pre_commit_hook(surface, &hook);
         }
     }
 }
@@ -532,104 +532,96 @@ delegate_shm!(State);
 
 impl State {
     pub fn add_default_dmabuf_pre_commit_hook(&mut self, surface: &WlSurface) {
-          if !surface.is_alive() {
-        error!("tried to add dmabuf pre-commit hook for a dead surface");
-        return;
-    }
-
-    let hook = add_pre_commit_hook::<Self, _>(surface, move |state, _dh, surface| {
-        // 1. Get the client early.
-        let Some(client) = surface.client() else {
+        if !surface.is_alive() {
+            error!("tried to add dmabuf pre-commit hook for a dead surface");
             return;
-        };
+        }
 
-        // 2. Extract BOTH the acquire_point and the dmabuf inside one with_states call.
-        let (acquire_point, maybe_dmabuf) = with_states(surface, |surface_data| {
-            // Get explicit sync acquire point
-            let acquire_point = surface_data
-                .cached_state
-                .get::<DrmSyncobjCachedState>()
-                .pending()
-                .acquire_point
-                .clone();
+        let hook = add_pre_commit_hook::<Self, _>(surface, move |state, _dh, surface| {
+            // 1. Get the client early.
+            let Some(client) = surface.client() else {
+                return;
+            };
 
-            // Get dmabuf if a new buffer is being attached (implicit sync)
-            let dmabuf = surface_data
-                .cached_state
-                .get::<SurfaceAttributes>()
-                .pending()
-                .buffer
-                .as_ref()
-                .and_then(|assignment| match assignment {
-                    BufferAssignment::NewBuffer(buffer) => get_dmabuf(buffer).cloned().ok(),
-                    _ => None,
-                });
+            // 2. Extract BOTH the acquire_point and the dmabuf inside one with_states call.
+            let (acquire_point, maybe_dmabuf) = with_states(surface, |surface_data| {
+                // Get explicit sync acquire point
+                let acquire_point = surface_data
+                    .cached_state
+                    .get::<DrmSyncobjCachedState>()
+                    .pending()
+                    .acquire_point
+                    .clone();
 
-            (acquire_point, dmabuf)
+                // Get dmabuf if a new buffer is being attached (implicit sync)
+                let dmabuf = surface_data
+                    .cached_state
+                    .get::<SurfaceAttributes>()
+                    .pending()
+                    .buffer
+                    .as_ref()
+                    .and_then(|assignment| match assignment {
+                        BufferAssignment::NewBuffer(buffer) => get_dmabuf(buffer).cloned().ok(),
+                        _ => None,
+                    });
+
+                (acquire_point, dmabuf)
+            });
+
+            // Priority 1: Use explicit sync acquire point if available.
+            if let Some(acquire_point) = acquire_point {
+                if let Ok((blocker, source)) = acquire_point.generate_blocker() {
+                    let res = state.niri.event_loop.insert_source(source, {
+                        let client = client.clone();
+                        move |_, _, state| {
+                            let display_handle = state.niri.display_handle.clone();
+                            state
+                                .client_compositor_state(&client)
+                                .blocker_cleared(state, &display_handle);
+                            Ok(())
+                        }
+                    });
+
+                    if res.is_ok() {
+                        add_blocker(surface, blocker);
+                        trace!("added explicit sync acquire point blocker");
+                        // RETURN early so we don't add an implicit dmabuf blocker too.
+                        return;
+                    }
+                }
+            }
+
+            // Priority 2: Fallback to implicit sync via dmabuf polling.
+            if let Some(dmabuf) = maybe_dmabuf {
+                if let Ok((blocker, source)) = dmabuf.generate_blocker(Interest::READ) {
+                    let res = state.niri.event_loop.insert_source(source, {
+                        let client = client.clone();
+                        move |_, _, state| {
+                            let display_handle = state.niri.display_handle.clone();
+                            state
+                                .client_compositor_state(&client)
+                                .blocker_cleared(state, &display_handle);
+                            Ok(())
+                        }
+                    });
+                    if res.is_ok() {
+                        add_blocker(surface, blocker);
+                        trace!("added default dmabuf blocker");
+                    }
+                }
+            }
         });
-
-        // Priority 1: Use explicit sync acquire point if available.
-        if let Some(acquire_point) = acquire_point {
-            if let Ok((blocker, source)) = acquire_point.generate_blocker() {
-                let res = 
-                    state
-                        .niri
-                        .event_loop
-                        .insert_source(source, {
-                            let client = client.clone();
-                            move |_, _, state| {
-                                let display_handle = state.niri.display_handle.clone();
-                                state
-                                    .client_compositor_state(&client)
-                                    .blocker_cleared(state, &display_handle);
-                                Ok(())
-                    }
-                });
-
-                if res.is_ok() {
-                    add_blocker(surface, blocker);
-                    trace!("added explicit sync acquire point blocker");
-                    // RETURN early so we don't add an implicit dmabuf blocker too.
-                    return; 
-                }
-            }
-        }
-
-        // Priority 2: Fallback to implicit sync via dmabuf polling.
-        if let Some(dmabuf) = maybe_dmabuf {
-            if let Ok((blocker, source)) = dmabuf.generate_blocker(Interest::READ) {
-                let res =
-                    state
-                        .niri
-                        .event_loop.
-                        insert_source(source, {
-                    let client = client.clone();
-                    move |_, _, state| {
-                        let display_handle = state.niri.display_handle.clone();
-                        state
-                            .client_compositor_state(&client)
-                            .blocker_cleared(state, &display_handle);
-                        Ok(())
-                    }
-                });
-                if res.is_ok() {
-                    add_blocker(surface, blocker);
-                    trace!("added default dmabuf blocker");
-                }
-            }
-        }
-    }); 
 
         let s = surface.clone();
         if let Some(prev) = self.niri.dmabuf_pre_commit_hook.insert(s, hook) {
             error!("tried to add dmabuf pre-commit hook when there was already one");
-            remove_pre_commit_hook(surface, prev);
+            remove_pre_commit_hook(surface, &prev);
         }
     }
 
     pub fn remove_default_dmabuf_pre_commit_hook(&mut self, surface: &WlSurface) {
         if let Some(hook) = self.niri.dmabuf_pre_commit_hook.remove(surface) {
-            remove_pre_commit_hook(surface, hook);
+            remove_pre_commit_hook(surface, &hook);
         } else {
             error!("tried to remove dmabuf pre-commit hook but there was none");
         }
