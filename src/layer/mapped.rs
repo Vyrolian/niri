@@ -258,6 +258,7 @@ impl MappedLayer {
         mut ctx: RenderCtx<R>,
         ns: Option<usize>,
         location: Point<f64, Logical>,
+        xray_pos: XrayPos,
         push: &mut dyn FnMut(LayerSurfaceRenderElement<R>),
     ) {
         if ctx.target.should_block_out(self.rules.block_out_from) {
@@ -278,7 +279,8 @@ impl MappedLayer {
             let alpha = alpha * popup_rules.opacity.unwrap_or(1.).clamp(0., 1.);
 
             let surface = popup.wl_surface();
-            let surface_loc = location + (offset - popup.geometry().loc).to_f64();
+            let popup_geo = popup.geometry();
+            let surface_loc = location + (offset - popup_geo.loc).to_f64();
 
             push_elements_from_surface_tree(
                 ctx.renderer,
@@ -290,13 +292,29 @@ impl MappedLayer {
                 &mut |elem| push(elem.into()),
             );
 
-            background_effect::render_for_surface(
-                surface,
+            let geometry = Rectangle::new(location + offset.to_f64(), popup_geo.size.to_f64());
+            let surface_off = popup_geo.loc.upscale(-1).to_f64();
+            let surface_anim_scale = Scale::from(1.);
+            let mut effect = popup_rules.background_effect;
+            // Default xray to false for pop-ups since they're always on top of something.
+            if effect.xray.is_none() {
+                effect.xray = Some(false);
+            }
+            let xray_pos = xray_pos.offset(offset.to_f64());
+            background_effect::render_for_tile(
                 ctx.as_gles(),
                 ns,
+                geometry,
+                self.scale,
+                false,
+                surface,
+                surface_off,
+                surface_anim_scale,
                 self.blur_config,
-                surface_loc,
-                scale,
+                popup_rules.geometry_corner_radius.unwrap_or_default(),
+                effect,
+                false,
+                xray_pos,
                 &mut |elem| push(elem.into()),
             );
         }
