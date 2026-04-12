@@ -801,12 +801,23 @@ impl State {
 
             // 3. Render and consume frames
             let state = self.niri.output_state.get(&output).unwrap();
-            let needs_redraw = matches!(
+
+            let niri_queued = matches!(
                 state.redraw_state,
                 RedrawState::Queued | RedrawState::WaitingForEstimatedVBlankAndQueued(_)
             );
 
+            // ADDED: Check if apps like browsers are waiting on a Wayland explicit sync FIFO
+            let fifo_queued = self.niri.output_has_fifo_waiters(&output);
+            let needs_redraw = niri_queued || fifo_queued;
+
             if needs_redraw {
+                // ADDED: If the redraw was triggered by a FIFO waiter, we must queue
+                // the redraw in Niri's state so self.niri.redraw doesn't panic.
+                if !niri_queued {
+                    self.niri.queue_redraw(&output);
+                }
+
                 // Correct signature: 2 arguments
                 self.niri.redraw(&mut self.backend, &output);
 
