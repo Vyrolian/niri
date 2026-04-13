@@ -66,7 +66,10 @@ Fixing this requries a refactor to the niri rendering code to defer offscreen re
 ### Implementation notes
 
 The `ext-background-effect` protocol supports any wl_surface.
-We currently implement it only for toplevels, layer surfaces, and popups, which should cover the vast majority of what's actually used by applications.
+
+We currently implement it only for toplevels, layer surfaces, and pop-ups, which should cover the vast majority of what's actually used by applications.
+
+For pop-ups, effects default to *non-xray* because pop-ups generally appear on top of windows.
 
 In particular, the following surface types don't support `ext-background-effect`.
 They can be implemented as the need arises.

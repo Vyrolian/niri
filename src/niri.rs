@@ -38,7 +38,8 @@ use smithay::desktop::utils::{
     bbox_from_surface_tree, output_update, send_dmabuf_feedback_surface_tree,
     send_frames_surface_tree, surface_presentation_feedback_flags_from_states,
     surface_primary_scanout_output, take_presentation_feedback_surface_tree,
-    under_from_surface_tree, update_surface_primary_scanout_output, OutputPresentationFeedback,
+    under_from_surface_tree, update_surface_primary_scanout_output, with_surfaces_surface_tree,
+    OutputPresentationFeedback,
 };
 use smithay::desktop::{
     find_popup_root_surface, layer_map_for_output, LayerMap, LayerSurface, PopupGrab, PopupManager,
@@ -72,6 +73,7 @@ use smithay::utils::{
 };
 use smithay::wayland::background_effect::BackgroundEffectState;
 use smithay::wayland::commit_timing::CommitTimingManagerState;
+
 use smithay::wayland::compositor::{
     with_states, with_surface_tree_downward, CompositorClientState, CompositorHandler,
     CompositorState, HookId, SurfaceData, TraversalAction,
@@ -4636,17 +4638,29 @@ impl Niri {
         // We use macros instead of closures to avoid borrowing issues (renderer and push() go
         // into different functions).
         macro_rules! push_popups_from_layer {
-            ($layer:expr, $ns:expr, $backdrop:expr, $push:expr) => {{
-                self.render_layer_popups(ctx.r(), $ns, &layer_map, $layer, $backdrop, $push);
+            ($layer:expr, $ns:expr, $xray_pos:expr, $backdrop:expr, $push:expr) => {{
+                self.render_layer_popups(
+                    ctx.r(),
+                    $ns,
+                    &layer_map,
+                    $layer,
+                    $xray_pos,
+                    $backdrop,
+                    $push,
+                );
             }};
             ($layer:expr, true) => {{
-                push_popups_from_layer!($layer, None, true, &mut |elem| push(elem.into()));
+                push_popups_from_layer!($layer, None, XrayPos::default(), true, &mut |elem| push(
+                    elem.into()
+                ));
             }};
-            ($layer:expr, $ns:expr, $push:expr) => {{
-                push_popups_from_layer!($layer, $ns, false, $push);
+            ($layer:expr, $ns:expr, $xray_pos:expr, $push:expr) => {{
+                push_popups_from_layer!($layer, $ns, $xray_pos, false, $push);
             }};
             ($layer:expr) => {{
-                push_popups_from_layer!($layer, None, false, &mut |elem| push(elem.into()));
+                push_popups_from_layer!($layer, None, XrayPos::default(), false, &mut |elem| push(
+                    elem.into()
+                ));
             }};
         }
         macro_rules! push_normal_from_layer {
@@ -4724,8 +4738,10 @@ impl Niri {
 
             for (ws, geo) in mon.workspaces_with_render_geo() {
                 let ns = Some(ws.id().get() as usize);
-                push_popups_from_layer!(Layer::Bottom, ns, process!(geo));
-                push_popups_from_layer!(Layer::Background, ns, process!(geo));
+
+                let xray_pos = XrayPos::new(geo.loc, zoom);
+                push_popups_from_layer!(Layer::Bottom, ns, xray_pos, process!(geo));
+                push_popups_from_layer!(Layer::Background, ns, xray_pos, process!(geo));
             }
 
             mon.render_workspaces(ctx.r(), focus_ring, &mut |elem| push(elem.into()));
@@ -4880,17 +4896,21 @@ impl Niri {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_layer_popups<R: NiriRenderer>(
         &self,
         mut ctx: RenderCtx<R>,
         ns: Option<usize>,
         layer_map: &LayerMap,
         layer: Layer,
+        xray_pos: XrayPos,
         for_backdrop: bool,
         push: &mut dyn FnMut(LayerSurfaceRenderElement<R>),
     ) {
         for (mapped, geo) in self.layers_in_render_order(layer_map, layer, for_backdrop) {
-            mapped.render_popups(ctx.r(), ns, geo.loc.to_f64(), push);
+            let loc = geo.loc.to_f64();
+            let xray_pos = xray_pos.offset(loc);
+            mapped.render_popups(ctx.r(), ns, loc, xray_pos, push);
         }
     }
 
@@ -5158,18 +5178,63 @@ impl Niri {
             });
         }
 
-        for surface in layer_map_for_output(output).layers() {
-            surface.with_surfaces(|surface, states| {
-                update_surface_primary_scanout_output(
-                    surface,
+        let xray = &self.output_state[output].xray;
+        let xray_bg = xray.background[RenderTarget::Output as usize].borrow();
+        let xray_bd = xray.backdrop[RenderTarget::Output as usize].borrow();
+
+        for layer in layer_map_for_output(output).layers() {
+            let surface = layer.wl_surface();
+            let is_background = layer.layer() == Layer::Background;
+
+            with_surfaces_surface_tree(surface, |surface, states| {
+                let primary_scanout_output = states
+                    .data_map
+                    .get_or_insert_threadsafe(Mutex::<PrimaryScanoutOutput>::default);
+                let mut primary_scanout_output = primary_scanout_output.lock().unwrap();
+                let mut id = Id::from_wayland_resource(surface);
+
+                // Background layers may be invisible normally but visible through an xray
+                // background effect. Try to find it and use the xray element's id in this case.
+                if is_background && !render_element_states.element_was_presented(id.clone()) {
+                    // A layer may be present either in background or backdrop, never in both.
+                    if xray_bg
+                        .render_element_states()
+                        .is_some_and(|s| s.element_was_presented(id.clone()))
+                    {
+                        id = xray_bg.id().clone();
+                    } else if xray_bd
+                        .render_element_states()
+                        .is_some_and(|s| s.element_was_presented(id.clone()))
+                    {
+                        id = xray_bd.id().clone();
+                    }
+                }
+
+                primary_scanout_output.update_from_render_element_states(
+                    id,
                     output,
-                    states,
                     None,
                     render_element_states,
                     // Layer surfaces are shown only on one output at a time.
                     |_, _, output, _| output,
                 );
             });
+
+            // Popups never go into xray buffers.
+            for (popup, _) in PopupManager::popups_for_surface(surface) {
+                let surface = popup.wl_surface();
+                with_surfaces_surface_tree(surface, |surface, states| {
+                    update_surface_primary_scanout_output(
+                        surface,
+                        output,
+                        states,
+                        None,
+                        render_element_states,
+                        // Layer surfaces are shown only on one output at a time.
+                        |_, _, output, _| output,
+                    );
+                });
+            }
         }
 
         if let Some(surface) = &self.output_state[output].lock_surface {
@@ -5213,7 +5278,6 @@ impl Niri {
                         render_element_states,
                         &feedback.render,
                         &feedback.scanout,
-                        &feedback.async_scanout,
                     )
                 },
             );
@@ -5229,7 +5293,6 @@ impl Niri {
                         render_element_states,
                         &feedback.render,
                         &feedback.scanout,
-                        &feedback.async_scanout,
                     )
                 },
             );
@@ -5246,7 +5309,6 @@ impl Niri {
                         render_element_states,
                         &feedback.render,
                         &feedback.scanout,
-                        &feedback.async_scanout,
                     )
                 },
             );
@@ -5263,7 +5325,6 @@ impl Niri {
                         render_element_states,
                         &feedback.render,
                         &feedback.scanout,
-                        &feedback.async_scanout,
                     )
                 },
             );
@@ -5280,7 +5341,6 @@ impl Niri {
                         render_element_states,
                         &feedback.render,
                         &feedback.scanout,
-                        &feedback.async_scanout,
                     )
                 },
             );
@@ -5891,6 +5951,7 @@ impl Niri {
             mapped.window.geometry().loc.to_f64(),
             scale,
             alpha,
+            XrayPos::default(),
             &mut |elem| elements.push(elem.into()),
         );
 

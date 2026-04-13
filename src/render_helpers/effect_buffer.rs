@@ -3,7 +3,7 @@ use std::mem;
 use anyhow::{ensure, Context as _};
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::damage::OutputDamageTracker;
-use smithay::backend::renderer::element::Id;
+use smithay::backend::renderer::element::{Id, RenderElementStates};
 use smithay::backend::renderer::gles::{GlesFrame, GlesRenderer, GlesTexture};
 use smithay::backend::renderer::utils::CommitCounter;
 use smithay::backend::renderer::{
@@ -58,6 +58,9 @@ struct Offscreen {
     scale: Scale<f64>,
     /// Damage tracker for drawing to the texture.
     damage: OutputDamageTracker,
+
+    /// Render element states from the last render into the offscreen.
+    states: RenderElementStates,
     /// Rendered blurred version of the texture.
     ///
     /// When texture needs to be reblurred, this field must be reset to `None`.
@@ -98,6 +101,10 @@ impl EffectBuffer {
 
     pub fn scale(&self) -> Scale<f64> {
         self.scale
+    }
+
+    pub fn render_element_states(&self) -> Option<&RenderElementStates> {
+        self.offscreen.as_ref().map(|o| &o.states)
     }
 
     pub fn update_size(&mut self, size: Size<i32, Physical>, scale: Scale<f64>) {
@@ -202,6 +209,8 @@ impl EffectBuffer {
                 renderer_context_id: renderer.context_id(),
                 scale: self.scale,
                 damage,
+
+                states: RenderElementStates::default(),
                 blurred: None,
             })
         };
@@ -238,6 +247,8 @@ impl EffectBuffer {
                 .render_output(renderer, &mut target, 1, &elements, Color32F::TRANSPARENT)
                 .context("error rendering")?
         };
+
+        offscreen.states = res.states;
 
         if res.damage.is_some() {
             self.commit_counter.increment();

@@ -1,9 +1,10 @@
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use niri_config::CornerRadius;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::utils::{Logical, Point, Rectangle, Scale};
-use smithay::wayland::compositor::with_states;
+
+use smithay::wayland::compositor::{with_states, SurfaceData};
 use wayland_server::protocol::wl_surface::WlSurface;
 
 use crate::handlers::background_effect::get_cached_blur_region;
@@ -82,14 +83,21 @@ niri_render_elements! {
 }
 
 impl BackgroundEffect {
-    pub fn new(blur_config: niri_config::Blur) -> Self {
+    pub fn new() -> Self {
         Self {
             nonxray: FramebufferEffect::new(),
             damage: ExtraDamage::new(),
             corner_radius: CornerRadius::default(),
-            blur_config,
+
+            blur_config: niri_config::Blur::default(),
             options: Options::default(),
         }
+    }
+
+    /// Damage the background effect, for example when a blur subregion changes.
+    pub fn damage(&mut self) {
+        self.damage.damage_all();
+        self.nonxray.damage();
     }
 
     pub fn update_config(&mut self, config: niri_config::Blur) {
@@ -99,6 +107,8 @@ impl BackgroundEffect {
 
         self.blur_config = config;
         self.damage.damage_all();
+
+        self.nonxray.damage();
     }
 
     pub fn update_render_elements(
@@ -127,8 +137,6 @@ impl BackgroundEffect {
             options.xray = true;
         }
 
-        // FIXME: do we also need to damage when subregion changes? Then we'll need to pass
-        // subregion in update_render_elements().
         if self.options == options && self.corner_radius == corner_radius {
             return;
         }
@@ -136,6 +144,7 @@ impl BackgroundEffect {
         self.options = options;
         self.corner_radius = corner_radius;
         self.damage.damage_all();
+        self.nonxray.damage();
     }
 
     pub fn is_visible(&self) -> bool {
@@ -191,75 +200,136 @@ impl BackgroundEffect {
             );
         } else {
             // Render non-xray effect.
-            let elem = &self.nonxray;
-            if let Some(elem) = elem.render(ns, params, blur_options, noise, saturation) {
-                push(damage.into());
-                push(elem.into());
+            let elem = self
+                .nonxray
+                .render(ns, params, blur_options, noise, saturation);
+            push(elem.into());
+        }
+    }
+}
+
+pub fn render_params_for_tile(
+    geometry: Rectangle<f64, Logical>,
+    scale: f64,
+    clip_to_geometry: bool,
+    block_out: bool,
+    blur_region: Option<Arc<Vec<Rectangle<i32, Logical>>>>,
+    surface_geo: Rectangle<f64, Logical>,
+    surface_anim_scale: Scale<f64>,
+) -> Option<RenderParams> {
+    // Effects not requested by the surface itself are drawn to match the geometry.
+    let mut clip = true;
+
+    let mut effect_geometry = geometry;
+    let mut subregion = None;
+    if let Some(rects) = blur_region {
+        if rects.is_empty() {
+            // Surface has a set, but empty blur region.
+            return None;
+        } else {
+            // If the surface itself requests the effects, apply different defaults.
+            clip = clip_to_geometry;
+
+            // Use geometry-shaped blur for blocked-out windows to avoid unintentionally
+            // leaking any surface shapes. We render those windows as geometry-shaped solid
+            // rectangles anyway.
+            if block_out {
+                clip = true;
+            } else {
+                let mut surface_geo = surface_geo.upscale(surface_anim_scale);
+                surface_geo.loc += geometry.loc;
+
+                subregion = Some(TransformedRegion {
+                    rects,
+                    scale: surface_anim_scale,
+                    offset: surface_geo.loc,
+                });
+
+                surface_geo = surface_geo
+                    .to_physical_precise_round(scale)
+                    .to_logical(scale);
+                effect_geometry = surface_geo;
             }
         }
     }
+
+    // This corner radius is reset to self.corner_radius in render().
+    let clip = clip.then_some((geometry, CornerRadius::default()));
+
+    Some(RenderParams {
+        geometry: effect_geometry,
+        subregion,
+        clip,
+        scale,
+    })
 }
 
 /// Per-surface background effect stored in its data map.
 struct SurfaceBackgroundEffect(Mutex<BackgroundEffect>);
 
-pub fn render_for_surface(
-    surface: &WlSurface,
+impl SurfaceBackgroundEffect {
+    fn get(states: &SurfaceData) -> &Self {
+        states
+            .data_map
+            .get_or_insert(|| SurfaceBackgroundEffect(Mutex::new(BackgroundEffect::new())))
+    }
+}
+
+pub fn damage_for_surface(states: &SurfaceData) {
+    if let Some(effect) = states.data_map.get::<SurfaceBackgroundEffect>() {
+        effect.0.lock().unwrap().damage();
+    }
+}
+
+// Silence, Clippy
+// A Smithay user is talking
+#[allow(clippy::too_many_arguments)]
+pub fn render_for_tile(
     ctx: RenderCtx<GlesRenderer>,
     ns: Option<usize>,
+    geometry: Rectangle<f64, Logical>,
+    scale: f64,
+    clip_to_geometry: bool,
+    surface: &WlSurface,
+    surface_off: Point<f64, Logical>,
+    surface_anim_scale: Scale<f64>,
     blur_config: niri_config::Blur,
-    location: Point<f64, Logical>,
-    scale: Scale<f64>,
+    radius: CornerRadius,
+    effect: niri_config::BackgroundEffect,
+    should_block_out: bool,
+    xray_pos: XrayPos,
     push: &mut dyn FnMut(BackgroundEffectElement),
 ) {
-    let blur_region = with_states(surface, get_cached_blur_region);
-    let Some(rects) = blur_region else {
-        return;
-    };
-    if rects.is_empty() {
-        return;
-    }
-
-    let main_surface_geo = surface_geo(surface).unwrap_or_default();
-    let mut main_surface_geo = main_surface_geo.to_f64();
-    main_surface_geo.loc += location;
-
-    let subregion = TransformedRegion {
-        rects,
-        scale: Scale::from(1.),
-        offset: main_surface_geo.loc,
-    };
-
-    let geometry = main_surface_geo
-        .to_physical_precise_round(scale)
-        .to_logical(scale);
-
-    let params = RenderParams {
-        geometry,
-        subregion: Some(subregion),
-        clip: None,
-        scale: scale.x,
-    };
-
     with_states(surface, |states| {
-        let background_effect = states.data_map.get_or_insert(|| {
-            let mut effect = BackgroundEffect::new(blur_config);
-            // All of these params are static so we can do it here.
-            effect.update_render_elements(
-                CornerRadius::default(),
-                niri_config::BackgroundEffect {
-                    // We don't do xray on popups.
-                    xray: Some(false),
-                    ..Default::default()
-                },
-                // We always have a blur region.
-                true,
-            );
-            SurfaceBackgroundEffect(Mutex::new(effect))
-        });
+        let background_effect = SurfaceBackgroundEffect::get(states);
         let mut background_effect = background_effect.0.lock().unwrap();
 
+        let blur_region = get_cached_blur_region(states);
+        let has_blur_region = blur_region.as_ref().is_some_and(|r| !r.is_empty());
+
         background_effect.update_config(blur_config);
-        background_effect.render(ctx, ns, params, XrayPos::default(), &mut |elem| push(elem));
+        background_effect.update_render_elements(radius, effect, has_blur_region);
+
+        if !background_effect.is_visible() {
+            return;
+        }
+
+        let mut surface_geo = surface_geo(states).unwrap_or_default().to_f64();
+        surface_geo.loc += surface_off;
+
+        let Some(params) = render_params_for_tile(
+            geometry,
+            scale,
+            clip_to_geometry,
+            should_block_out,
+            blur_region,
+            surface_geo,
+            surface_anim_scale,
+        ) else {
+            return;
+        };
+
+        let xray_pos = xray_pos.offset(params.geometry.loc - geometry.loc);
+        background_effect.render(ctx, ns, params, xray_pos, push);
     });
 }

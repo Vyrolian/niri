@@ -42,6 +42,19 @@ layer-rule {
         noise 0.05
         saturation 3
     }
+
+
+    popups {
+        opacity 0.5
+        geometry-corner-radius 6
+
+        background-effect {
+            xray true
+            blur true
+            noise 0.05
+            saturation 3
+        }
+    }
 }
 ```
 
@@ -241,3 +254,38 @@ layer-rule {
     }
 }
 ```
+<<<<<<< HEAD
+=======
+
+#### `popups`
+
+<sup>Since: next release</sup>
+
+Override properties for this layer surface's pop-ups (e.g. a menu opened by clicking an item in Waybar).
+
+The properties work the same way as the corresponding layer-rule properties, except that they apply to the layer surface's pop-ups rather than to the layer surface itself.
+
+`opacity` is applied *on top* of the layer surface's own opacity rule, so setting both will make pop-ups more transparent than the surface.
+Other properties apply independently.
+
+> [!NOTE]
+> This block does not affect input-method pop-ups, such as Fcitx.
+> Only the app's own pop-ups.
+
+```kdl
+// Blur the background behind Waybar popup menus.
+layer-rule {
+    match namespace="^waybar$"
+
+    popups {
+        // Match the default GTK 3 popup corner radius.
+        geometry-corner-radius 6
+        opacity 0.85
+
+        background-effect {
+            blur true
+        }
+    }
+}
+```
+>>>>>>> wip/branch

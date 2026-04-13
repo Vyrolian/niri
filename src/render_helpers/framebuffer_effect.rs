@@ -23,11 +23,15 @@ use crate::utils::region::TransformedRegion;
 #[derive(Debug)]
 pub struct FramebufferEffect {
     id: Id,
+
+    commit: CommitCounter,
 }
 
 #[derive(Debug)]
 pub struct FramebufferEffectElement {
     id: Id,
+
+    commit: CommitCounter,
     geometry: Rectangle<f64, Logical>,
     clip_geo: Rectangle<f64, Logical>,
     corner_radius: CornerRadius,
@@ -49,7 +53,14 @@ struct Inner {
 
 impl FramebufferEffect {
     pub fn new() -> Self {
-        Self { id: Id::new() }
+        Self {
+            id: Id::new(),
+            commit: CommitCounter::default(),
+        }
+    }
+
+    pub fn damage(&mut self) {
+        self.commit.increment();
     }
 
     pub fn render(
@@ -59,7 +70,7 @@ impl FramebufferEffect {
         blur_options: Option<BlurOptions>,
         noise: f32,
         saturation: f32,
-    ) -> Option<FramebufferEffectElement> {
+    ) -> FramebufferEffectElement {
         let (clip_geo, corner_radius) = params
             .clip
             .unwrap_or((params.geometry, CornerRadius::default()));
@@ -69,8 +80,9 @@ impl FramebufferEffect {
             id = id.namespaced(ns);
         }
 
-        let element = FramebufferEffectElement {
+        FramebufferEffectElement {
             id,
+            commit: self.commit,
             geometry: params.geometry,
             clip_geo,
             corner_radius,
@@ -79,9 +91,7 @@ impl FramebufferEffect {
             blur_options,
             noise,
             saturation,
-        };
-
-        Some(element)
+        }
     }
 }
 
@@ -126,7 +136,7 @@ impl Element for FramebufferEffectElement {
     }
 
     fn current_commit(&self) -> CommitCounter {
-        CommitCounter::default()
+        self.commit
     }
 
     fn src(&self) -> Rectangle<f64, Buffer> {

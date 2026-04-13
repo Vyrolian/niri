@@ -331,15 +331,13 @@ pub fn is_laptop_panel(connector: &str) -> bool {
 /// Returns the geometry of the surface.
 ///
 /// Returns `None` if the surface isn't mapped.
-pub fn surface_geo(surface: &WlSurface) -> Option<Rectangle<i32, Logical>> {
-    with_states(surface, |states| {
-        let data = states.data_map.get::<RendererSurfaceStateUserData>();
-        data.and_then(|d| d.lock().unwrap().view())
-            .map(|view| Rectangle {
-                loc: view.offset,
-                size: view.dst,
-            })
-    })
+pub fn surface_geo(states: &SurfaceData) -> Option<Rectangle<i32, Logical>> {
+    let data = states.data_map.get::<RendererSurfaceStateUserData>();
+    data.and_then(|d| d.lock().unwrap().view())
+        .map(|view| Rectangle {
+            loc: view.offset,
+            size: view.dst,
+        })
 }
 
 pub fn with_toplevel_role<T>(

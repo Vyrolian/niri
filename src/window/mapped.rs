@@ -7,7 +7,7 @@ use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
 use smithay::backend::renderer::element::Kind;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::desktop::space::SpaceElement as _;
-use smithay::desktop::{PopupManager, Window};
+use smithay::desktop::{PopupKind, PopupManager, Window};
 use smithay::output::{self, Output};
 use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1;
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
@@ -30,6 +30,7 @@ use crate::layout::{
     LayoutElementRenderSnapshot, SizingMode,
 };
 use crate::niri_render_elements;
+use crate::render_helpers::background_effect::BackgroundEffectElement;
 use crate::render_helpers::border::BorderRenderElement;
 use crate::render_helpers::offscreen::OffscreenData;
 use crate::render_helpers::renderer::NiriRenderer;
@@ -38,6 +39,8 @@ use crate::render_helpers::solid_color::{SolidColorBuffer, SolidColorRenderEleme
 use crate::render_helpers::surface::{
     push_elements_from_surface_tree, render_snapshot_from_surface_tree,
 };
+
+use crate::render_helpers::xray::XrayPos;
 use crate::render_helpers::{background_effect, BakedBuffer, RenderCtx, RenderTarget};
 use crate::utils::id::IdCounter;
 use crate::utils::transaction::Transaction;
@@ -106,7 +109,7 @@ pub struct Mapped {
     /// Buffer to draw instead of the window when it should be blocked out.
     block_out_buffer: RefCell<SolidColorBuffer>,
 
-    /// The blur config, passed for per-surface blur rendering.
+    /// The blur config, passed for background effect rendering.
     blur_config: niri_config::Blur,
 
     /// Whether the next configure should be animated, if the configured state changed.
@@ -536,6 +539,7 @@ impl Mapped {
             location,
             scale,
             1.,
+            XrayPos::default(),
             &mut |elem| push(use_border(elem)),
         );
     }
@@ -662,18 +666,26 @@ impl LayoutElement for Mapped {
         location: Point<f64, Logical>,
         scale: Scale<f64>,
         alpha: f32,
+        xray_pos: XrayPos,
         push: &mut dyn FnMut(LayoutElementRenderElement<R>),
     ) {
         if ctx.target.should_block_out(self.rules.block_out_from) {
             return;
         }
 
-        let buf_pos = location - self.window.geometry().loc.to_f64();
         let surface = self.toplevel().wl_surface();
-        for (popup, popup_offset) in PopupManager::popups_for_surface(surface) {
+
+        for (popup, offset) in PopupManager::popups_for_surface(surface) {
+            let popup_rules = match popup {
+                PopupKind::Xdg(_) => self.rules.popups,
+                // IME popups aren't affected by rules for regular popups.
+                PopupKind::InputMethod(_) => niri_config::ResolvedPopupsRules::default(),
+            };
+            let alpha = alpha * popup_rules.opacity.unwrap_or(1.).clamp(0., 1.);
+
             let surface = popup.wl_surface();
-            let offset = self.window.geometry().loc + popup_offset - popup.geometry().loc;
-            let surface_loc = buf_pos + offset.to_f64();
+            let popup_geo = popup.geometry();
+            let surface_loc = location + (offset - popup.geometry().loc).to_f64();
 
             push_elements_from_surface_tree(
                 ctx.renderer,
@@ -685,16 +697,62 @@ impl LayoutElement for Mapped {
                 &mut |elem| push(elem.into()),
             );
 
-            background_effect::render_for_surface(
-                surface,
+            let geometry = Rectangle::new(location + offset.to_f64(), popup_geo.size.to_f64());
+            let surface_off = popup_geo.loc.upscale(-1).to_f64();
+            let surface_anim_scale = Scale::from(1.);
+            let mut effect = popup_rules.background_effect;
+            // Default xray to false for pop-ups since they're always on top of something.
+            if effect.xray.is_none() {
+                effect.xray = Some(false);
+            }
+            let xray_pos = xray_pos.offset(offset.to_f64());
+            background_effect::render_for_tile(
                 ctx.as_gles(),
                 None,
+                geometry,
+                scale.x,
+                false,
+                surface,
+                surface_off,
+                surface_anim_scale,
                 self.blur_config,
-                surface_loc,
-                scale,
+                popup_rules.geometry_corner_radius.unwrap_or_default(),
+                effect,
+                false,
+                xray_pos,
                 &mut |elem| push(elem.into()),
             );
         }
+    }
+
+    fn render_background_effect(
+        &self,
+        ctx: RenderCtx<GlesRenderer>,
+        geometry: Rectangle<f64, Logical>,
+        scale: f64,
+        clip_to_geometry: bool,
+        surface_anim_scale: Scale<f64>,
+        radius: CornerRadius,
+        xray_pos: XrayPos,
+        push: &mut dyn FnMut(BackgroundEffectElement),
+    ) {
+        let should_block_out = ctx.target.should_block_out(self.rules.block_out_from);
+        background_effect::render_for_tile(
+            ctx,
+            None,
+            geometry,
+            scale,
+            clip_to_geometry,
+            self.toplevel().wl_surface(),
+            self.buf_loc().to_f64(),
+            surface_anim_scale,
+            self.blur_config,
+            radius,
+            self.rules.background_effect,
+            should_block_out,
+            xray_pos,
+            push,
+        );
     }
 
     fn request_size(
@@ -1319,7 +1377,11 @@ impl LayoutElement for Mapped {
     }
 
     fn main_surface_geo(&self) -> Rectangle<i32, Logical> {
-        let mut geo = surface_geo(self.toplevel().wl_surface()).unwrap_or_default();
+        let mut geo =
+            smithay::wayland::compositor::with_states(self.toplevel().wl_surface(), |states| {
+                surface_geo(states)
+            })
+            .unwrap_or_default();
         // Make it relative to the visual geometry.
         geo.loc -= self.window.geometry().loc;
         geo

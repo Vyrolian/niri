@@ -122,6 +122,8 @@ fn mark_blur_region_pending_dirty(wl_surface: &WlSurface) {
                     if guard.pending_dirty {
                         guard.pending_dirty = false;
                         guard.dirty = true;
+
+                        crate::render_helpers::background_effect::damage_for_surface(states);
                     }
                 } else {
                     error!("unexpected missing CachedBlurRegionUserData");

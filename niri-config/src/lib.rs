@@ -59,7 +59,9 @@ use crate::recent_windows::RecentWindowsPart;
 pub use crate::recent_windows::{MruDirection, MruFilter, MruPreviews, MruScope, RecentWindows};
 pub use crate::utils::FloatOrInt;
 use crate::utils::{Flag, MergeWith as _};
-pub use crate::window_rule::{FloatingPosition, RelativeTo, WindowRule};
+pub use crate::window_rule::{
+    FloatingPosition, PopupsRule, RelativeTo, ResolvedPopupsRules, WindowRule,
+};
 pub use crate::workspace::{Workspace, WorkspaceLayoutPart};
 
 const RECURSION_LIMIT: u8 = 10;
@@ -1637,6 +1639,13 @@ mod tests {
                 noise: 0.02,
                 saturation: 1.5,
             },
+            blur: Blur {
+                off: false,
+                passes: 3,
+                offset: 3.0,
+                noise: 0.02,
+                saturation: 1.5,
+            },
             gestures: Gestures {
                 dnd_edge_view_scroll: DndEdgeViewScroll {
                     trigger_width: 10.0,
@@ -1873,6 +1882,16 @@ mod tests {
                         noise: None,
                         saturation: None,
                     },
+                    popups: PopupsRule {
+                        opacity: None,
+                        geometry_corner_radius: None,
+                        background_effect: BackgroundEffectRule {
+                            xray: None,
+                            blur: None,
+                            noise: None,
+                            saturation: None,
+                        },
+                    },
                 },
             ],
             layer_rules: [
@@ -1914,6 +1933,19 @@ mod tests {
                         noise: None,
                         saturation: None,
                     },
+<<<<<<< HEAD
+=======
+                    popups: PopupsRule {
+                        opacity: None,
+                        geometry_corner_radius: None,
+                        background_effect: BackgroundEffectRule {
+                            xray: None,
+                            blur: None,
+                            noise: None,
+                            saturation: None,
+                        },
+                    },
+>>>>>>> wip/branch
                 },
             ],
             binds: Binds(

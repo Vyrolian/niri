@@ -107,6 +107,18 @@ window-rule {
         saturation 3
     }
 
+    popups {
+        opacity 0.5
+        geometry-corner-radius 15
+
+        background-effect {
+            xray true
+            blur true
+            noise 0.05
+            saturation 3
+        }
+    }
+
     min-width 100
     max-width 200
     min-height 300
@@ -941,6 +953,48 @@ window-rule {
 }
 ```
 
+<<<<<<< HEAD
+=======
+#### `popups`
+
+<sup>Since: next release</sup>
+
+Override properties for this window's pop-ups (menus and tooltips).
+
+The properties work the same way as the corresponding window-rule properties, except that they apply to the window's pop-ups rather than to the window itself.
+
+`opacity` is applied *on top* of the layer surface's own opacity rule, so setting both will make pop-ups more transparent than the surface.
+Other properties apply independently.
+
+> [!NOTE]
+> This block does not affect input-method pop-ups, such as Fcitx.
+> Only the app's own pop-ups.
+
+```kdl
+// Blur the background behind pop-up menus in Nautilus.
+window-rule {
+    match app-id="Nautilus"
+
+    popups {
+        // Matches the default libadwaita pop-up corner radius.
+        geometry-corner-radius 15
+
+        // Note: it'll look better to set background opacity
+        // through your GTK theme CSS and not here.
+        // This is just an example that makes it look obvious.
+        opacity 0.5
+
+        background-effect {
+            blur true
+        }
+    }
+}
+```
+
+Keep in mind that the background effect will look right only if the pop-up is shaped like a (rounded) rectangle, and the window correctly sets its Wayland geometry to exclude any shadows.
+For example, GTK 4 pop-ups with pointing arrows (`has-arrow=true` property) are *not* rounded rectangles—the arrow sticks out—so if you enable blur, it will also stick out of the pop-up.
+
+>>>>>>> wip/branch
 #### Size Overrides
 
 You can amend the window's minimum and maximum size in logical pixels.

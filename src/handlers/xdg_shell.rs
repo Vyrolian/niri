@@ -18,12 +18,12 @@ use smithay::reexports::wayland_server::protocol::wl_seat::WlSeat;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::{self, Resource, WEnum};
 use smithay::utils::{Logical, Rectangle, Serial};
-use smithay::wayland::drm_syncobj::DrmSyncobjCachedState;
 use smithay::wayland::compositor::{
     add_blocker, add_pre_commit_hook, with_states, BufferAssignment, CompositorHandler as _,
     HookId, SurfaceAttributes,
 };
 use smithay::wayland::dmabuf::get_dmabuf;
+use smithay::wayland::drm_syncobj::DrmSyncobjCachedState;
 use smithay::wayland::input_method::InputMethodSeat;
 use smithay::wayland::shell::kde::decoration::{KdeDecorationHandler, KdeDecorationState};
 use smithay::wayland::shell::wlr_layer::{self, Layer};
@@ -875,11 +875,8 @@ impl XdgShellHandler for State {
         // If this is the only instance, then this transaction will complete immediately, so no
         // need to set the timer.
         if !transaction.is_last() {
-    transaction.register_deadline_timer(
-        &self.niri.event_loop,
-        &self.niri.display_handle,
-    );
-}   
+            transaction.register_deadline_timer(&self.niri.event_loop, &self.niri.display_handle);
+        }
         if was_active {
             self.maybe_warp_cursor_to_focus();
         }
@@ -1440,16 +1437,16 @@ fn unconstrain_with_padding(
     positioner.get_unconstrained_geometry(target.to_i32_round())
 }
 
-pub fn add_mapped_toplevel_pre_commit_hook(toplevel: &ToplevelSurface) -> HookId  {
+pub fn add_mapped_toplevel_pre_commit_hook(toplevel: &ToplevelSurface) -> HookId {
     add_pre_commit_hook::<State, _>(toplevel.wl_surface(), move |state, _dh, surface| {
         let _span = tracy_client::span!("mapped toplevel pre-commit");
         let span =
             trace_span!("toplevel pre-commit", surface = %surface.id(), serial = Empty).entered();
 
-        let Some((mapped, _)) = state.niri.layout.find_window_and_output_mut(surface) else {
+        let Some((mapped, output)) = state.niri.layout.find_window_and_output_mut(surface) else {
             error!("pre-commit hook for mapped surfaces must be removed upon unmapping");
             return;
-        }; 
+        };
 
         // 1. Extract buffer states, explicit sync points, and dmabufs
         let (got_unmapped, commit_serial, acquire_point, dmabuf) = with_states(surface, |states| {
@@ -1459,13 +1456,13 @@ pub fn add_mapped_toplevel_pre_commit_hook(toplevel: &ToplevelSurface) -> HookId
                     Some(BufferAssignment::NewBuffer(buffer)) => {
                         let dmabuf = get_dmabuf(buffer).cloned().ok();
                         (false, dmabuf)
-                    } 
+                    }
                     Some(BufferAssignment::Removed) => (true, None),
                     None => (false, None),
                 }
             };
 
-           let role = states
+            let role = states
                 .data_map
                 .get::<XdgToplevelSurfaceData>()
                 .unwrap()
@@ -1474,7 +1471,9 @@ pub fn add_mapped_toplevel_pre_commit_hook(toplevel: &ToplevelSurface) -> HookId
 
             let serial = role.last_acked.as_ref().map(|c| c.serial);
 
-            let acquire_point = states.cached_state.get::<DrmSyncobjCachedState>()
+            let acquire_point = states
+                .cached_state
+                .get::<DrmSyncobjCachedState>()
                 .pending()
                 .acquire_point
                 .clone();
@@ -1485,7 +1484,7 @@ pub fn add_mapped_toplevel_pre_commit_hook(toplevel: &ToplevelSurface) -> HookId
         // 2. Handle Resize Transactions
         let mut transaction_for_dmabuf = None;
         let mut animate = false;
-        
+
         if let Some(serial) = commit_serial {
             if !span.is_disabled() {
                 span.record("serial", format!("{serial:?}"));
@@ -1496,15 +1495,17 @@ pub fn add_mapped_toplevel_pre_commit_hook(toplevel: &ToplevelSurface) -> HookId
                 if !transaction.is_completed() && !disable {
                     // Register the deadline even if this is the last pending, since dmabuf
                     // rendering can still run over the deadline.
-                    transaction.register_deadline_timer(&state.niri.event_loop, 
-    &state.niri.display_handle,);
+                    transaction.register_deadline_timer(
+                        &state.niri.event_loop,
+                        &state.niri.display_handle,
+                    );
 
                     let is_last = transaction.is_last();
 
                     // If this is the last transaction, we don't need to add a separate
                     // notification, because the transaction will complete in our dmabuf blocker
                     // callback, which already calls blocker_cleared(), or by the end of this
-                    // function, in which case there would be no blocker in the first place. 
+                    // function, in which case there would be no blocker in the first place.
                     if !is_last {
                         // Waiting for some other surface; register a notification and add a
                         // transaction blocker.
@@ -1515,7 +1516,7 @@ pub fn add_mapped_toplevel_pre_commit_hook(toplevel: &ToplevelSurface) -> HookId
                             );
                             add_blocker(surface, transaction.blocker());
                         }
-                    } 
+                    }
 
                     // Keep the transaction alive until the GPU finishes rendering this frame.
                     transaction_for_dmabuf = Some(transaction);
@@ -1529,11 +1530,9 @@ pub fn add_mapped_toplevel_pre_commit_hook(toplevel: &ToplevelSurface) -> HookId
         // 3. Apply GPU Synchronization (Explicit -> Implicit -> SHM)
         if let Some(client) = surface.client() {
             // Priority A: Explicit Sync (linux-drm-syncobj-v1)
-            if let Some((blocker, source)) = acquire_point.and_then(|ap| ap.generate_blocker().ok()) {
-                let res = state
-                    .niri
-                    .event_loop
-                    .insert_source(source, {
+            if let Some((blocker, source)) = acquire_point.and_then(|ap| ap.generate_blocker().ok())
+            {
+                let res = state.niri.event_loop.insert_source(source, {
                     let client = client.clone();
                     move |_, _, state| {
                         drop(transaction_for_dmabuf.take());
@@ -1549,9 +1548,11 @@ pub fn add_mapped_toplevel_pre_commit_hook(toplevel: &ToplevelSurface) -> HookId
                     add_blocker(surface, blocker);
                     trace!("added explicit gpu sync blocker");
                 }
-            } 
+            }
             // Priority B: Fallback to Implicit Sync (dmabuf polling)
-            else if let Some((blocker, source)) = dmabuf.and_then(|d| d.generate_blocker(Interest::READ).ok()) {
+            else if let Some((blocker, source)) =
+                dmabuf.and_then(|d| d.generate_blocker(Interest::READ).ok())
+            {
                 let res = state.niri.event_loop.insert_source(source, {
                     let client = client.clone();
                     move |_, _, state| {
@@ -1562,24 +1563,23 @@ pub fn add_mapped_toplevel_pre_commit_hook(toplevel: &ToplevelSurface) -> HookId
                             .client_compositor_state(&client)
                             .blocker_cleared(state, &display_handle);
 
-                        Ok(()) 
+                        Ok(())
                     }
                 });
-                
+
                 if res.is_ok() {
                     add_blocker(surface, blocker);
                     trace!("added implicit gpu sync blocker");
                 }
             }
-            // Priority C (Implicitly handled): 
+            // Priority C (Implicitly handled):
         }
 
         // 4. Snapshots and Cleanup
         let window = mapped.window.clone();
         if got_unmapped {
-            state.backend.with_primary_renderer(|renderer| {
-                state.niri.layout.store_unmap_snapshot(renderer, None, false, &window);
-            });
+            let output = output.cloned();
+            state.store_unmap_snapshot(&window, output.as_ref());
         } else {
             if animate {
                 state.backend.with_primary_renderer(|renderer| {
@@ -1590,4 +1590,4 @@ pub fn add_mapped_toplevel_pre_commit_hook(toplevel: &ToplevelSurface) -> HookId
             state.niri.layout.clear_unmap_snapshot(&window);
         }
     })
-} 
+}

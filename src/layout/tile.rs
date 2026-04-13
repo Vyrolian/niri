@@ -18,7 +18,7 @@ use super::{
 use crate::animation::{Animation, Clock};
 use crate::layout::SizingMode;
 use crate::niri_render_elements;
-use crate::render_helpers::background_effect::{self, BackgroundEffect, BackgroundEffectElement};
+use crate::render_helpers::background_effect::BackgroundEffectElement;
 use crate::render_helpers::border::BorderRenderElement;
 use crate::render_helpers::clipped_surface::{ClippedSurfaceRenderElement, RoundedCornerDamage};
 use crate::render_helpers::damage::ExtraDamage;
@@ -30,7 +30,6 @@ use crate::render_helpers::snapshot::RenderSnapshot;
 use crate::render_helpers::solid_color::{SolidColorBuffer, SolidColorRenderElement};
 use crate::render_helpers::xray::{Xray, XrayPos};
 use crate::render_helpers::{RenderCtx, RenderTarget};
-use crate::utils::region::TransformedRegion;
 use crate::utils::transaction::Transaction;
 use crate::utils::{
     baba_is_float_offset, round_logical_in_physical, round_logical_in_physical_max1,
@@ -59,9 +58,6 @@ pub struct Tile<W: LayoutElement> {
 
     /// The black backdrop for fullscreen windows.
     fullscreen_backdrop: SolidColorBuffer,
-
-    /// The background effect, like blur, behind the window.
-    background_effect: BackgroundEffect,
 
     /// Whether the tile should float upon unfullscreening.
     pub(super) restore_to_floating: bool,
@@ -199,7 +195,6 @@ impl<W: LayoutElement> Tile<W> {
             shadow: Shadow::new(shadow_config),
             sizing_mode,
             fullscreen_backdrop: SolidColorBuffer::new((0., 0.), [0., 0., 0., 1.]),
-            background_effect: BackgroundEffect::new(options.blur),
             restore_to_floating: false,
             floating_window_size: None,
             floating_pos: None,
@@ -257,7 +252,6 @@ impl<W: LayoutElement> Tile<W> {
         let shadow_config = self.options.layout.shadow.merged_with(&rules.shadow);
         self.shadow.update_config(shadow_config);
 
-        self.background_effect.update_config(self.options.blur);
         self.window.update_config(self.options.blur);
     }
 
@@ -466,17 +460,6 @@ impl<W: LayoutElement> Tile<W> {
         let rules = self.window.rules();
         let animated_tile_size = self.animated_tile_size();
         let expanded_progress = self.expanded_progress();
-
-        let radius = rules
-            .geometry_corner_radius
-            .unwrap_or_default()
-            .scaled_by(1. - expanded_progress as f32);
-        let has_blur_region = self.window.blur_region().is_some_and(|r| !r.is_empty());
-        self.background_effect.update_render_elements(
-            radius,
-            rules.background_effect,
-            has_blur_region,
-        );
 
         let draw_border_with_background = rules
             .draw_border_with_background
@@ -1082,10 +1065,14 @@ impl<W: LayoutElement> Tile<W> {
             .scaled_by(1. - expanded_progress as f32);
 
         // Popups go on top, whether it's resize or not.
-        self.window
-            .render_popups(ctx.r(), window_render_loc, scale, win_alpha, &mut |elem| {
-                push(elem.into())
-            });
+        self.window.render_popups(
+            ctx.r(),
+            window_render_loc,
+            scale,
+            win_alpha,
+            xray_pos,
+            &mut |elem| push(elem.into()),
+        );
 
         // If we're resizing, try to render a shader, or a fallback.
         let mut pushed_resize = false;
@@ -1305,62 +1292,17 @@ impl<W: LayoutElement> Tile<W> {
                 .render(ctx.renderer, location, &mut |elem| push(elem.into()));
         }
 
-        if self.background_effect.is_visible() {
-            // Effects not requested by the surface itself are drawn to match the geometry.
-            let mut clip = true;
-
-            // FIXME: support blur regions on subsurfaces in addition to the main surface.
-            let mut subregion = None;
-            let blur_geometry = if let Some(rects) = self.window.blur_region() {
-                if rects.is_empty() {
-                    // Surface has a set, but empty blur region.
-                    None
-                } else {
-                    // If the surface itself requests the effects, apply different defaults.
-                    clip = rules.clip_to_geometry == Some(true);
-
-                    // Use geometry-shaped blur for blocked-out windows to avoid unintentionally
-                    // leaking any surface shapes. We render those windows as geometry-shaped solid
-                    // rectangles anyway.
-                    if ctx.target.should_block_out(rules.block_out_from) {
-                        clip = true;
-                        Some(area)
-                    } else {
-                        let anim_scale = animated_window_size / window_size;
-                        let mut main_surface_geo =
-                            self.window.main_surface_geo().to_f64().upscale(anim_scale);
-                        main_surface_geo.loc += area.loc;
-
-                        subregion = Some(TransformedRegion {
-                            rects,
-                            scale: anim_scale,
-                            offset: main_surface_geo.loc,
-                        });
-
-                        main_surface_geo = main_surface_geo
-                            .to_physical_precise_round(self.scale)
-                            .to_logical(self.scale);
-                        Some(main_surface_geo)
-                    }
-                }
-            } else {
-                Some(area)
-            };
-
-            if let Some(geometry) = blur_geometry {
-                xray_pos = xray_pos.offset(geometry.loc - area.loc);
-                let params = background_effect::RenderParams {
-                    geometry,
-                    subregion,
-                    clip: clip.then_some((area, CornerRadius::default())),
-                    scale: self.scale,
-                };
-                self.background_effect
-                    .render(ctx.as_gles(), None, params, xray_pos, &mut |elem| {
-                        push(elem.into())
-                    });
-            }
-        }
+        let surface_anim_scale = animated_window_size / window_size;
+        self.window.render_background_effect(
+            ctx.as_gles(),
+            area,
+            self.scale,
+            clip_to_geometry,
+            surface_anim_scale,
+            radius,
+            xray_pos,
+            &mut |elem| push(elem.into()),
+        );
     }
 
     pub fn render<R: NiriRenderer>(

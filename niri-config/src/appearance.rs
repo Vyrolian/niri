@@ -1067,12 +1067,6 @@ pub struct BackgroundEffectRule {
     pub saturation: Option<FloatOrInt<0, 1000>>,
 }
 
-impl MergeWith<Self> for BackgroundEffectRule {
-    fn merge_with(&mut self, part: &Self) {
-        merge_clone_opt!((self, part), xray, blur, noise, saturation);
-    }
-}
-
 /// Resolved background effect rule.
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub struct BackgroundEffect {
