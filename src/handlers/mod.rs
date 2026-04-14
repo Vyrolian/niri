@@ -3,13 +3,6 @@ mod compositor;
 mod layer_shell;
 mod xdg_shell;
 
-use std::fs::File;
-use std::io::Write;
-use std::os::fd::OwnedFd;
-use std::sync::Arc;
-use std::thread;
-use std::time::Duration;
-use smithay::delegate_fifo;
 use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::drm::DrmNode;
 use smithay::backend::input::{InputEvent, TabletToolDescriptor};
@@ -62,15 +55,21 @@ use smithay::wayland::xdg_activation::{
     XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData,
 };
 use smithay::{
-    delegate_commit_timing, delegate_cursor_shape, delegate_data_control, delegate_data_device, delegate_dmabuf,
-    delegate_drm_lease, delegate_ext_data_control, delegate_fractional_scale,
+    delegate_cursor_shape, delegate_data_control, delegate_data_device, delegate_dmabuf,
+    delegate_drm_lease, delegate_drm_syncobj, delegate_ext_data_control, delegate_fractional_scale,
     delegate_idle_inhibit, delegate_idle_notify, delegate_input_method_manager,
     delegate_keyboard_shortcuts_inhibit, delegate_output, delegate_pointer_constraints,
     delegate_pointer_gestures, delegate_presentation, delegate_primary_selection,
     delegate_relative_pointer, delegate_seat, delegate_security_context, delegate_session_lock,
     delegate_single_pixel_buffer, delegate_tablet_manager, delegate_text_input_manager,
-    delegate_viewporter, delegate_virtual_keyboard_manager, delegate_xdg_activation, delegate_drm_syncobj,
+    delegate_viewporter, delegate_virtual_keyboard_manager, delegate_xdg_activation,
 };
+use std::fs::File;
+use std::io::Write;
+use std::os::fd::OwnedFd;
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
 pub use crate::handlers::xdg_shell::KdeDecorationsModeState;
 use crate::layout::workspace::WorkspaceId;
@@ -843,5 +842,3 @@ delegate_mutter_x11_interop!(State);
 
 delegate_single_pixel_buffer!(State);
 delegate_drm_syncobj!(State);
-delegate_fifo!(State);
-delegate_commit_timing!(State);

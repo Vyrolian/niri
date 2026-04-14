@@ -72,7 +72,6 @@ use smithay::utils::{
     Transform, SERIAL_COUNTER,
 };
 use smithay::wayland::background_effect::BackgroundEffectState;
-use smithay::wayland::commit_timing::CommitTimingManagerState;
 
 use smithay::wayland::compositor::{
     with_states, with_surface_tree_downward, CompositorClientState, CompositorHandler,
@@ -80,7 +79,6 @@ use smithay::wayland::compositor::{
 };
 use smithay::wayland::cursor_shape::CursorShapeManagerState;
 use smithay::wayland::dmabuf::DmabufState;
-use smithay::wayland::fifo::FifoManagerState;
 use smithay::wayland::fractional_scale::FractionalScaleManagerState;
 use smithay::wayland::idle_inhibit::IdleInhibitManagerState;
 use smithay::wayland::idle_notify::IdleNotifierState;
@@ -413,9 +411,6 @@ pub struct Niri {
 
     pub ipc_server: Option<IpcServer>,
     pub ipc_outputs_changed: bool,
-    pub fifo_manager_state: FifoManagerState,
-    pub commit_timing_manager_state: CommitTimingManagerState,
-    pub commit_timing_trigger_token: Option<RegistrationToken>,
     pub satellite: Option<Satellite>,
 
     #[cfg(feature = "xdp-gnome-screencast")]
@@ -760,87 +755,22 @@ impl State {
     pub fn refresh_and_flush_clients(&mut self) {
         let _span = tracy_client::span!("State::refresh_and_flush_clients");
 
-        // Clear the previous dynamic scheduling timer
-        if let Some(token) = self.niri.commit_timing_trigger_token.take() {
-            self.niri.event_loop.remove(token);
-        }
-
         self.refresh();
         self.niri.advance_animations();
 
         let outputs: Vec<_> = self.niri.output_state.keys().cloned().collect();
-        let mut queued_outputs = Vec::new();
 
-        // Safely extract the timing targets manually
-        for output in &outputs {
-            let state = self.niri.output_state.get(output).unwrap();
-            let target = state.frame_clock.next_presentation_time();
-            let interval = state.frame_clock.refresh_interval();
-            queued_outputs.push((output.clone(), target, interval));
-        }
-
-        // Sort by time so we process the most immediate deadlines first
-        queued_outputs.sort_by_key(|(_, target, _)| *target);
-
-        let mut min_next_schedule: Option<Duration> = None;
-
-        for (output, target_presentation_time, refresh_interval) in queued_outputs {
-            // 1. Signal dynamically scheduled commit timers
-            let next_deadline = self.signal_commit_timing(&output, target_presentation_time);
-
-            // 2. Compute the next precise wake-up time
-            if let Some(next_deadline) = next_deadline {
-                let interval = refresh_interval.unwrap_or_else(|| Duration::from_millis(16));
-
-                let diff = next_deadline.saturating_sub(target_presentation_time);
-                let steps = (diff.as_secs_f64() / interval.as_secs_f64()) as u32;
-
-                let next_schedule = target_presentation_time + (interval * steps);
-                min_next_schedule = min_next_schedule
-                    .map(|current| current.min(next_schedule))
-                    .or(Some(next_schedule));
-            }
-
-            // 3. Render and consume frames
-            let state = self.niri.output_state.get(&output).unwrap();
-
-            let niri_queued = matches!(
-                state.redraw_state,
-                RedrawState::Queued | RedrawState::WaitingForEstimatedVBlankAndQueued(_)
-            );
-
-            // ADDED: Check if apps like browsers are waiting on a Wayland explicit sync FIFO
-            let fifo_queued = self.niri.output_has_fifo_waiters(&output);
-            let needs_redraw = niri_queued || fifo_queued;
+        for output in outputs {
+            let needs_redraw = {
+                let state = self.niri.output_state.get(&output).unwrap();
+                matches!(
+                    state.redraw_state,
+                    RedrawState::Queued | RedrawState::WaitingForEstimatedVBlankAndQueued(_)
+                )
+            };
 
             if needs_redraw {
-                // ADDED: If the redraw was triggered by a FIFO waiter, we must queue
-                // the redraw in Niri's state so self.niri.redraw doesn't panic.
-                if !niri_queued {
-                    self.niri.queue_redraw(&output);
-                }
-
-                // Correct signature: 2 arguments
                 self.niri.redraw(&mut self.backend, &output);
-
-                // 4. Release FIFO barriers for consumed frames
-                self.signal_fifo(&output);
-            }
-        }
-
-        // Setup the high-resolution timer to wake the compositor precisely at the next deadline
-        if let Some(min_next_schedule) = min_next_schedule {
-            let now = crate::utils::get_monotonic_time();
-
-            if let Some(delay) = min_next_schedule.checked_sub(now) {
-                if !delay.is_zero() {
-                    let token = self
-                        .niri
-                        .event_loop
-                        .insert_source(Timer::from_duration(delay), |_, _, _| TimeoutAction::Drop)
-                        .unwrap();
-                    self.niri.commit_timing_trigger_token = Some(token);
-                }
             }
         }
 
@@ -853,182 +783,7 @@ impl State {
         self.niri.pointer_inactivity_timer_got_reset = false;
         self.niri.notified_activity_this_iteration = false;
     }
-    // 👇 PASTE IT RIGHT HERE 👇
-    fn signal_fifo(&mut self, output: &Output) {
-        use smithay::desktop::utils::surface_primary_scanout_output;
-        use smithay::reexports::wayland_server::backend::ClientId;
-        use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-        use smithay::wayland::compositor::{
-            with_surface_tree_downward, SurfaceData, TraversalAction,
-        };
-        use smithay::wayland::fifo::FifoBarrierCachedState;
-        use std::collections::HashMap;
 
-        #[allow(clippy::mutable_key_type)]
-        let mut clients: HashMap<ClientId, Client> = HashMap::new();
-
-        let mut check_surface = |surface: &WlSurface, states: &SurfaceData| {
-            let primary_scanout_output = surface_primary_scanout_output(surface, states);
-            if primary_scanout_output
-                .as_ref()
-                .map_or(true, |o| o == output)
-            {
-                if let Some(fifo_barrier) = states
-                    .cached_state
-                    .get::<FifoBarrierCachedState>()
-                    .current()
-                    .barrier
-                    .take()
-                {
-                    fifo_barrier.signal();
-                    if let Some(client) = surface.client() {
-                        clients.insert(client.id(), client);
-                    }
-                }
-            }
-        };
-
-        for mapped in self.niri.layout.windows_for_output(output) {
-            mapped.window.with_surfaces(&mut check_surface);
-        }
-
-        for surface in layer_map_for_output(output).layers() {
-            surface.with_surfaces(&mut check_surface);
-        }
-
-        if let Some(state) = self.niri.output_state.get(output) {
-            if let Some(surface) = &state.lock_surface {
-                with_surface_tree_downward(
-                    surface.wl_surface(),
-                    (),
-                    |_, _, _| TraversalAction::DoChildren(()),
-                    |surface, states, _| check_surface(surface, states),
-                    |_, _, _| true,
-                );
-            }
-        }
-
-        if let Some(surface) = self.niri.dnd_icon.as_ref().map(|icon| &icon.surface) {
-            with_surface_tree_downward(
-                surface,
-                (),
-                |_, _, _| TraversalAction::DoChildren(()),
-                |surface, states, _| check_surface(surface, states),
-                |_, _, _| true,
-            );
-        }
-
-        if let CursorImageStatus::Surface(surface) = self.niri.cursor_manager.cursor_image() {
-            with_surface_tree_downward(
-                surface,
-                (),
-                |_, _, _| TraversalAction::DoChildren(()),
-                |surface, states, _| check_surface(surface, states),
-                |_, _, _| true,
-            );
-        }
-
-        let display_handle = self.niri.display_handle.clone();
-        for client in clients.into_values() {
-            self.client_compositor_state(&client)
-                .blocker_cleared(self, &display_handle);
-        }
-    }
-    fn signal_commit_timing(
-        &mut self,
-        output: &Output,
-        target_presentation_time: Duration,
-    ) -> Option<Duration> {
-        use smithay::reexports::wayland_server::backend::ClientId;
-        use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-        use smithay::utils::{Monotonic, Time};
-        use smithay::wayland::commit_timing::CommitTimerBarrierStateUserData;
-        use smithay::wayland::compositor::{
-            with_surface_tree_downward, SurfaceData, TraversalAction,
-        };
-        use std::collections::HashMap;
-
-        let target_time_monotonic = Time::<Monotonic>::from(target_presentation_time);
-        let mut min_next_deadline: Option<Time<Monotonic>> = None;
-
-        #[allow(clippy::mutable_key_type)]
-        let mut clients: HashMap<ClientId, Client> = HashMap::new();
-
-        let mut check_surface = |surface: &WlSurface, states: &SurfaceData| {
-            if let Some(mut commit_timer_state) = states
-                .data_map
-                .get::<CommitTimerBarrierStateUserData>()
-                .map(|commit_timer| commit_timer.lock().unwrap())
-            {
-                if commit_timer_state.signal_until(target_time_monotonic) {
-                    if let Some(client) = surface.client() {
-                        clients.insert(client.id(), client);
-                    }
-                }
-
-                if let Some(next_ts) = commit_timer_state.next_deadline() {
-                    let next_time = Time::<Monotonic>::from(next_ts);
-                    min_next_deadline = min_next_deadline
-                        .map(|current| {
-                            if next_time < current {
-                                next_time
-                            } else {
-                                current
-                            }
-                        })
-                        .or(Some(next_time));
-                }
-            }
-        };
-
-        for mapped in self.niri.layout.windows_for_output(output) {
-            mapped.window.with_surfaces(&mut check_surface);
-        }
-
-        for surface in layer_map_for_output(output).layers() {
-            surface.with_surfaces(&mut check_surface);
-        }
-
-        if let Some(state) = self.niri.output_state.get(output) {
-            if let Some(surface) = &state.lock_surface {
-                with_surface_tree_downward(
-                    surface.wl_surface(),
-                    (),
-                    |_, _, _| TraversalAction::DoChildren(()),
-                    |surface, states, _| check_surface(surface, states),
-                    |_, _, _| true,
-                );
-            }
-        }
-
-        if let Some(surface) = self.niri.dnd_icon.as_ref().map(|icon| &icon.surface) {
-            with_surface_tree_downward(
-                surface,
-                (),
-                |_, _, _| TraversalAction::DoChildren(()),
-                |surface, states, _| check_surface(surface, states),
-                |_, _, _| true,
-            );
-        }
-
-        if let CursorImageStatus::Surface(surface) = self.niri.cursor_manager.cursor_image() {
-            with_surface_tree_downward(
-                surface,
-                (),
-                |_, _, _| TraversalAction::DoChildren(()),
-                |surface, states, _| check_surface(surface, states),
-                |_, _, _| true,
-            );
-        }
-
-        let display_handle = self.niri.display_handle.clone();
-        for client in clients.into_values() {
-            self.client_compositor_state(&client)
-                .blocker_cleared(self, &display_handle);
-        }
-
-        min_next_deadline.map(|t| t.into())
-    }
     // We monitor both libinput and logind: libinput is always there (including without DBus), but
     // it misses some switch events (e.g. after unsuspend) on some systems.
     pub fn set_lid_closed(&mut self, is_closed: bool) {
@@ -2484,11 +2239,7 @@ impl Niri {
         is_session_instance: bool,
     ) -> Self {
         let _span = tracy_client::span!("Niri::new");
-        // ✅ GOOD: Create display_handle first!
         let display_handle = display.handle();
-        // ✅ GOOD: Now we can use it!
-        let fifo_manager_state = FifoManagerState::new::<State>(&display_handle);
-        let commit_timing_manager_state = CommitTimingManagerState::new::<State>(&display_handle);
         let (executor, scheduler) = calloop::futures::executor().unwrap();
         event_loop.insert_source(executor, |_, _, _| ()).unwrap();
 
@@ -2878,9 +2629,6 @@ impl Niri {
             ipc_outputs_changed: false,
 
             satellite: None,
-            fifo_manager_state,
-            commit_timing_manager_state,
-            commit_timing_trigger_token: None,
             #[cfg(feature = "xdp-gnome-screencast")]
             casting: screencasting,
         };
@@ -3909,94 +3657,19 @@ impl Niri {
     pub fn redraw_queued_outputs(&mut self, backend: &mut Backend) {
         let _span = tracy_client::span!("Niri::redraw_queued_outputs");
 
-        while let Some((output, _)) = self.output_state.iter().find(|(output, state)| {
-            // Check original Niri states
-            let niri_queued = matches!(
+        while let Some((output, _)) = self.output_state.iter().find(|(_, state)| {
+            matches!(
                 state.redraw_state,
                 RedrawState::Queued | RedrawState::WaitingForEstimatedVBlankAndQueued(_)
-            );
-
-            // Check if we have apps waiting on FIFO (your new logic)
-            let fifo_queued = self.output_has_fifo_waiters(output);
-
-            niri_queued || fifo_queued
+            )
         }) {
             let output = output.clone();
-            trace!("redrawing output");
-
-            // Redraw needs the state to be "Queued" to pass internal checks
-            if !matches!(
-                self.output_state[&output].redraw_state,
-                RedrawState::Queued | RedrawState::WaitingForEstimatedVBlankAndQueued(_)
-            ) {
-                self.queue_redraw(&output);
-            }
-
             self.redraw(backend, &output);
         }
     }
 
     // 2. This is the helper function
     // // It hides all the surface-looping code so your main function stays pretty.
-    fn output_has_fifo_waiters(&self, output: &Output) -> bool {
-        use smithay::wayland::fifo::FifoBarrierCachedState;
-        use std::cell::Cell; // Add this or use std::cell::Cell below
-
-        // 1. If we are currently waiting for hardware (VBlank),
-        // don't report as "queued" to avoid double-draws.
-        if let Some(state) = self.output_state.get(output) {
-            if matches!(state.redraw_state, RedrawState::WaitingForVBlank { .. }) {
-                return false;
-            }
-        }
-
-        // 2. Use a Cell to bypass the borrow checker error
-        let found_waiter = Cell::new(false);
-
-        // 3. The closure now takes a reference to the Cell container
-        let mut check_surface = |_: &WlSurface, states: &SurfaceData| {
-            if states
-                .cached_state
-                .get::<FifoBarrierCachedState>()
-                .pending()
-                .barrier
-                .is_some()
-            {
-                found_waiter.set(true);
-            }
-        };
-
-        // Check Windows
-        for mapped in self.layout.windows_for_output(output) {
-            mapped.window.with_surfaces(&mut check_surface);
-            if found_waiter.get() {
-                return true;
-            }
-        }
-
-        // Check Layers
-        for surface in layer_map_for_output(output).layers() {
-            surface.with_surfaces(&mut check_surface);
-            if found_waiter.get() {
-                return true;
-            }
-        }
-
-        // Check Lock Screen
-        if let Some(state) = self.output_state.get(output) {
-            if let Some(lock) = &state.lock_surface {
-                with_surface_tree_downward(
-                    lock.wl_surface(),
-                    (),
-                    |_, _, _| TraversalAction::DoChildren(()),
-                    |surface, states, _| check_surface(surface, states),
-                    |_, _, _| true,
-                );
-            }
-        }
-
-        found_waiter.get()
-    }
     pub fn render_pointer<R: NiriRenderer>(
         &self,
         renderer: &mut R,
